@@ -33,6 +33,7 @@ def add_extra_metrics(exp_obj: ISIR_PolicyExperiments,
     results['elapsed_nominal'] = results['day'] - exp_obj.c_nominal_ref_date
     results['elapsed_policy'] = results['day'] - results.p_FlightBans
     results['p_FlightBans_rel'] = results['p_FlightBans'].map(exp_obj.p_flightbans_map)
+    results['p_FlightBans_nom'] = results['p_FlightBans'] - exp_obj.c_nominal_ref_date
     return results
 
 

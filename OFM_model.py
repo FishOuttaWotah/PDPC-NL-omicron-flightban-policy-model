@@ -1,4 +1,4 @@
-from typing import Union, Sequence, Dict, Any, Callable
+from typing import Union, Sequence, Dict, Any, Callable, Mapping
 import collections, itertools, random
 import pandas as pd
 import numpy as np
@@ -10,19 +10,14 @@ This Python file contains the description of the Omicron Flights Importation Mod
 """
 
 
-#
+# think: recall what ISIR was supposed to mean
 class ISIR_PolicyExperiments:
-    # handles the importation parts and conducts bulk runs with the propagator
-
-    # code for inferred imports by certain date
-    # the apply float method?
-    # instantiate and run propagator
-    # get outputs?
-    # should this already be the experiment handling level already?
-    # yeah have a very simple experiment handling (policy for flight ban)
-
-    # just a serial run, nothing too fancy for now
-    # then focus on plotting and illustration
+    """
+    The Experiment level for the OFM model. It
+    - generates sets of experiments/scenarios,
+    - runs the experiments with the model
+    - collects the output from the model
+    """
 
     class INPUTS:
         UNCERTAINTY = 'u_'
@@ -36,7 +31,6 @@ class ISIR_PolicyExperiments:
         'u_ImportsFunc': 'imports_flights',
         'p_FlightBans': 'flightban_on',
         'u_Func_Infectious': 'func_infectious',
-        'u_ImportsIndirect': 'imports_indirect',
         'u_ImportsOther': 'imports_other',
         'c_model_engine': 'engine',
         'c_SimTime': 'sim_time',
@@ -44,31 +38,65 @@ class ISIR_PolicyExperiments:
     }
 
     # define params to be excluded from single model run
+    # TODO: should I make opt-in instead of opt-out?
     PARAMS_EXCLUDE_FROM_MODEL = (
         'self',
         'c_nominal_ref_date',
         'u_ImportsFunc',
-        'c_import_scaling_mode'
+        'c_import_scaling_mode',
+        'debug_mode'
+
+    )
+
+    # prototype (not used)
+    PARAMS_INCLUDE_IN_MODEL = (
+        'u_TIncub',
+        'u_Rzero',
+        'u_ImportsFlights',
+        'u_ImportsIndirect',
+        'u_ImportsOther',
+        'c_SimTime',
+        'c_PopTotal',
+        'c_model_engine',
+        'p_FlightBans',
+        'u_Func_Infectious'
+    )
+
+    PARAMS_PASS_THROUGH_VARIABLE = (
+        'u_ImportsOther',
+    )
+
+    PARAMS_PASS_THROUGH_CONSTANT = (
+
+    )
+
+    PARAMS_EXCLUDE_FROM_RESULTS = (
+        "u_Func_Infectious"   # a numpy array, would make the output too large
     )
 
     def __init__(self,
                  u_ImportsFunc,
                  u_TIncub: Sequence[int] = (3,),
                  u_Rzero: Sequence[float] = (1.3,),  # was 3.22 baseline
-                 u_ImportsFlights: Sequence[float] = (10.,),
+                 u_ImportsFlights: Sequence[float]|None = (10.,),
                  u_Func_Infectious: Sequence[Sequence[float]] | None = None,
-                 u_ImportsIndirect: Sequence[float] = (10.,),  # v4 (indirect entry)
-                 u_ImportsOther: Sequence[float] = (10.,),  # v4 (miscellaneous addition)
+                 u_ImportsIndirect: Sequence[float] | None = None,  # v4 (indirect entry)
+                 u_ImportsOther: Sequence[pd.Series] | None = None,  # v4 (miscellaneous manual inputs)
                  p_FlightBans: Sequence[int] | None = None,
                  c_SimTime: int = 120,  # days
-                 c_PopTotal: int = 17480000,  # 17.48 mil
-                 c_nominal_ref_date=16,  # 16 corresponds with 25th Nov
+                 c_PopTotal: int = 17480000,  # 17.48 mil for NL
+                 c_nominal_ref_date=17,  # 17 corresponds with 26th Nov
                  c_import_scaling_mode=2,  # v3
-                 c_model_engine='step_v2',  # v3
+                 c_model_engine='step_v2_variable_beta',  # v3
+                 debug_mode = False,  # v4: only runs one scenario and saves as state
+                 save_constants = False, # v4: decide whether constants are saved in the results_metadate df
                  ):
         self.params = locals().copy()  # get the model inputs, this WILL be modified for passing into the single model run.
         self.PARAMS_RAW = locals().copy()  # make a non-modified version of the model inputs
         self.debug_unmapped_args = []
+        self.debug_mode = debug_mode
+        self.debug_experiment = None # TODO: decide if one experiment or several
+        self.save_consts = save_constants
 
         # Save experiment inputs
         self.u_imports_func = u_ImportsFunc
@@ -80,7 +108,7 @@ class ISIR_PolicyExperiments:
         self.c_sim_time = c_SimTime
         self.c_pop_total = c_PopTotal
         self.c_nominal_ref_date = c_nominal_ref_date
-        self.u_nominal_imports = u_ImportsFlights
+
 
         ## Handle import scaling mode
         # decides how the import function should be (up)scaled
@@ -96,15 +124,29 @@ class ISIR_PolicyExperiments:
                 f"OFM_experiments:(c_import_scaling_mode of {c_import_scaling_mode} is invalid for model.")
 
         # Conduct scaling for import functions
-        self.imports_inflated, self.imports_nominal_cumul, self.inflation_factor = self.inflate_importation_function(
-            imports=u_ImportsFunc,
-            nominal_target=self.u_nominal_imports,
-            date_slice=self.c_import_ref_dates)
+        self.u_imports_flights = u_ImportsFlights
+        self.u_imports_indirect = u_ImportsIndirect  # v4
+        self.c_imports_other = u_ImportsOther # v4
+        if u_ImportsFunc is not None:
+            if u_ImportsFlights is not None:
+                self.i_flights_scaled, self.i_flights_cumul, self.i_flights_infl_factor = self.inflate_importation_function(
+                    imports=u_ImportsFunc,
+                    nominal_target=self.u_imports_flights,
+                    date_slice=self.c_import_ref_dates)
 
-        # self.imports_inflated = self.imports_inflated.to_dict()  # hack from Pd Series to dict
+            if u_ImportsIndirect is not None:
+                self.i_nonflights_scaled, self.i_nonflights_cumul, self.i_nonflights_infl_factor = self.inflate_importation_function(
+                    imports=u_ImportsFunc,
+                    nominal_target=self.u_imports_indirect,
+                    date_slice=self.c_import_ref_dates
+                )
+        else:
+            # if imports func not provided, these states are all None
+            self.i_flights_scaled = self.i_flights_cumul = self.i_flights_infl_factor = self.i_nonflights_scaled =self.i_nonflights_cumul = self.i_nonflights_infl_factor = None
+            print('OFM_PE warning: No import function (u_ImportFunc) provided')
 
         # identify which params are varied or constant
-        self.params_varied, self.params_const = self.sort_variables(self.params)
+        self.params_varied, self.params_const, self.params_null = self.sort_variables(self.params)
         self.scenarios = self.generate_scenarios(
             variables=self.params_varied,
             constants=self.params_const,
@@ -126,21 +168,30 @@ class ISIR_PolicyExperiments:
         :return: tuple with dict of variables and dict of constants
         """
         # exclude params with defined criteria
-        input_params = self.filter_excluded_params(input_params.copy(), ## copy() for non-destructive operations
-                                                   compare=self.PARAMS_EXCLUDE_FROM_MODEL)
-
-        p_varied = {}
+        # input_params = self.filter_excluded_params(input_params.copy(), ## copy() for non-destructive operations
+        #                                            compare=self.PARAMS_EXCLUDE_FROM_MODEL)
+        input_params = self.filter_included_params(input_params.copy(),
+                                                   compare=self.PARAMS_INCLUDE_IN_MODEL)
+        # ^ use copy() for non-destructive operations
+        p_variable = {}
         p_constant = {}
         p_error = {}
+        p_none = []
         for k, v in input_params.items():
             # if there is attribute len, and not present in exclude
             try:  # for catching non-valid len attributes
                 # catch criteria:
                 # 1. if has valid length attribute (with a non-null value)
                 # 2. is not a string (so list, tuple, etc.)
-                if hasattr(v, "__len__") and isinstance(len(v), int) and not isinstance(v, str):
+                # 3. if the param is designated in a pass-through set
+                if v is None:  # for None-inserted variables
+                    p_none.append(k)
+                    # continue  # we skip
+                # elif k in self.PARAMS_PASS_THROUGH_VARIABLE:  (might be useful at a later stage)
+                #     p_variable[k] = v
+                elif hasattr(v, "__len__") and isinstance(len(v), int) and not isinstance(v, str):
                     if len(v) > 1:  # if more than 1, thus a variable
-                        p_varied[k] = v
+                        p_variable[k] = v
                     else:  # if only size 1, thus a constant
                         p_constant[k] = v[0]
                 else:  # no len, also a constant
@@ -154,13 +205,21 @@ class ISIR_PolicyExperiments:
                              f'This usually means you had a typo, wrong input format, or did not update the '
                              f'PARAMS_EXCLUDE_FROM_MODEL set')
 
-        return p_varied, p_constant
+        return p_variable, p_constant, p_none
+
 
     @staticmethod
     def filter_excluded_params(params: Dict, compare: Sequence[str] = PARAMS_EXCLUDE_FROM_MODEL):
+        # keys_to_excl = set(params.keys()) - set(compare)
         return dict((k, v) for k, v in params.items() if k not in compare)
 
-    def generate_scenarios(self, variables: Dict, constants: Dict,
+    @staticmethod
+    def filter_included_params(params:Dict, compare: Sequence[str] = PARAMS_INCLUDE_IN_MODEL):
+        keys_to_incl = set(params.keys()) & set(compare)
+        return dict((k,params[k]) for k in keys_to_incl)
+
+    @staticmethod
+    def generate_scenarios(variables: Dict, constants: Dict,
                            arg_name_map: Dict):
 
         # code does the following (read from back):
@@ -171,42 +230,76 @@ class ISIR_PolicyExperiments:
         # scenarios = [dict(zip(variables.keys(), inputs), **constants) for inputs in itertools.product(*variables.values())]
         scenarios = []
         for vars_set in itertools.product(*variables.values()):
-            input_set = dict(zip(variables.keys(), vars_set), **constants)
+            input_set = dict(zip(variables.keys(), vars_set)) #, **constants)
             scenarios.append(input_set)
 
         return scenarios
 
     def run_experiments(self):
-        # create a bunch of experiments and run, no sophisticated things
+        # create a bunch of experiments and run sequentially.
         # iterate through all scenarios
         print(f"OFM_PE: Running {len(self.scenarios)} experiments")
         start_time = time.time()
-        for scen_idx, scen_args in enumerate(self.scenarios):
-            variables = scen_args.copy()  # make a copy for labelling
-            variables = self.map_input_names(variables, arg_name_map=self.ARG_NAME_MAP)
+        for exp_idx, exp_vars in enumerate(self.scenarios):
+            ## Prepare experiment params for model input
+            exp_params = exp_vars.copy()  # make a copy for labelling
+            exp_params.update(self.params_const)  # add constants (inefficient, but makes further handling convenient)
+            mod_inputs = self.map_input_names(exp_params, arg_name_map=self.ARG_NAME_MAP) # convert from experiment-level param names to model param names
 
-            if 'u_ImportsFlights' in scen_args:  # if it is a variable
-                imports = self.imports_inflated[
-                    variables.pop('u_ImportsFlights')]  # get which import function to take, and
+            # Get scaled import function for model and drop the scaling factor value
+            if 'u_ImportsFlights' in mod_inputs and self.i_flights_scaled is not None:  # if it is a variable
+                imports = self.i_flights_scaled[
+                    mod_inputs.pop('u_ImportsFlights')]  # get which import function to take, and
                 # ^ eliminate the entry "u_ImportsFlights", because it shouldn't be given as an input.
             else:
-                raise Exception('cannot generate \'imports\' variable in run_experiments()')
-            # m_inputs = dict((self.ARG_NAME_MAP[k], v) for k, v in scen_inputs.items())  # rename to
+                mod_inputs.pop('u_ImportsFlights', None)
+                imports = None
+                # raise Exception('cannot generate \'imports\' variable in run_experiments()')
+
+            # check if indirect flights (optional) is available
+            if 'u_ImportsIndirect' in mod_inputs and self.i_nonflights_scaled is not None:
+                imports_indirect = self.i_nonflights_scaled[
+                    mod_inputs.pop('u_ImportsIndirect')]
+            else:
+                mod_inputs.pop('u_ImportsFlights', None)
+                imports_indirect = None
+
+            # Initiate model
             experiment = ISIRmodel_SingleRun(
                 imports_flights=imports,
+                imports_indirect=imports_indirect,
                 postprocess_to_df=True,
-                **variables
-                # **m_inputs,
-                # **m_constants,
-            )
-            experiment.run_model()
-            #  add experiment entries to output
-            scen_args.pop('u_Func_Infectious')  # TODO hack!
-            self.results_verbose[scen_idx] = experiment.output.assign(**scen_args)
-            self.results_metadata[scen_idx] = scen_args
-        self.results_postprocess = self.postprocess_to_df(self.results_verbose,
-                                                          map_to_invert=self.ARG_NAME_MAP)  # create unified dataframe
-        print(f"OFM_PE: all experiments completed in {round((time.time() - start_time) / 60, 1)} mins")
+                **mod_inputs)
+
+            # Run simulation if not in debug mode
+            if not self.debug_mode:
+                experiment.run_model()
+                ## Saving results
+
+
+                # save either all params or just variables
+                if self.save_consts:
+                    save_params = exp_params
+                else:
+                    save_params = exp_vars
+                for param_excl in self.PARAMS_EXCLUDE_FROM_RESULTS:  # exclude certain bulky params if present
+                    save_params.pop(param_excl, None)
+
+                # save experiment output and metadata
+                self.results_verbose[exp_idx] = experiment.output.assign(**exp_vars)
+                self.results_metadata[exp_idx] = save_params # save metadata
+            elif self.debug_mode and self.debug_experiment is None: # preserve 1st experiment
+                self.debug_experiment = experiment
+                break
+            # else: # we only preserve one experiment
+            #     break
+
+        if not self.debug_mode:
+            self.results_postprocess = self.postprocess_to_df(self.results_verbose,
+                                                              map_to_invert=self.ARG_NAME_MAP)  # create unified dataframe
+            print(f"OFM_PE: all experiments completed in {round((time.time() - start_time) / 60, 1)} mins")
+        else:
+            print(f'OFM_PE: Debug mode on, 1 experiment initiated, but not run')
 
     def map_input_names(self, input_set: Dict, arg_name_map: Dict):
         # identify which args don't have a mapping
@@ -218,9 +311,9 @@ class ISIR_PolicyExperiments:
 
     @staticmethod
     def postprocess_to_df(results_verbose, map_to_invert: Dict | None = None):
-        # concat results into dataframe and set some added indices
+        # concatenate results into dataframe and set some added indices
         results_df = pd.concat(results_verbose)
-        if map_to_invert is not None:
+        if map_to_invert is not None:  # Invert column names from model-level to experiment-level
             reverse_map = {v: k for k, v in map_to_invert.items()}
             results_df = results_df.rename(columns=reverse_map)
         return results_df
@@ -240,8 +333,11 @@ class ISIR_PolicyExperiments:
     @staticmethod
     def get_flightban_days(flightban_days, ref_date):
         # convert the (relative) flightban days
-        # TODO: note that if flightban_days has None, will raise an Error
-        return tuple(ref_date + delta for delta in flightban_days)
+
+        non_int_check = [i for i in flightban_days if type(i) != int]  # update for v4
+        if non_int_check:
+            print(f"OFM_PE Warning: {__name__} has non-integer flightban value(s) {non_int_check}. If this is intentional, do proceed.")
+        return tuple(ref_date + delta if isinstance(delta, int) else delta for delta in flightban_days)
 
 
 class ISIRmodel_SingleRun:
@@ -250,16 +346,22 @@ class ISIRmodel_SingleRun:
                  *,  # ensures function is called with parameter names
                  R_zero,
                  t_incubation: int,
-                 func_infectious: Sequence[float],  ## NEW ITEM
                  pop_total: int,
                  sim_time: int,
                  imports_flights: pd.Series | None = None,
+                 func_infectious: Sequence[float]| None = None,  ## v3
                  flightban_on: int | None = None,
-                 postprocess_to_df: bool = False,  # TODO note
-                 engine: str = 'step_standard',
+                 postprocess_to_df: bool = False,
+                 engine: str = 'step_v1_constant_beta',
                  imports_indirect: pd.Series | None = None,  # added v4
                  imports_other: pd.Series | None = None  # added v4
                  ):
+
+        # make copy of model inputs
+        self.debug_inputs = locals().copy()
+        if 'kwargs' in self.debug_inputs:
+            self.debug_inputs.update(self.debug_inputs.pop('kwargs'))
+
         # check if engine choice is valid
         if hasattr(self, engine) and callable(getattr(self, engine)):
             self.engine_name = engine
@@ -284,7 +386,7 @@ class ISIRmodel_SingleRun:
         self.TERMINATE_BELOW_I_TOTAL = 1.  # total infectious
         self.terminate = False  # TODO: NEW, for early termination
 
-        ## Handling for case importation (v4)
+        ## Handling for case importation (updated v4)
         if imports_flights is not None:
             if flightban_on is not None:
                 imports_flights = imports_flights.loc[:flightban_on-1] # we assume no more imports on the flightban day itself
@@ -300,11 +402,11 @@ class ISIRmodel_SingleRun:
 
         # conduct superimposed import function
         if len(import_sets) >= 1:
-            self.imports_all = pd.concat(import_sets, axis=1)
-            self.imports_func = self.imports_all.sum(axis=1)
+            self.imports_components = pd.concat(import_sets, axis=1)
+            self.imports_func = self.imports_components.sum(axis=1)
         else:
-            raise Exception("ISIR_Single: no importation function was provided")
-
+            self.imports_func = {}  # empty set
+            raise Warning('OFM_model warning: Omicron imports function is empty')
 
         # # Handle case importation
         # if imports_func is None:  # if no imports applied
@@ -331,7 +433,9 @@ class ISIRmodel_SingleRun:
 
         # Instantiate model states
         self.sim_current = 0
-        if engine == 'step_v2':
+        if engine == 'step_v2_variable_beta':
+            if func_infectious is None:
+                raise Exception(f"OFM_model: \'step_v2_variable_beta\' model engine needs a defined func_infectious")
             self.pop_infectious = collections.deque([0] * len(func_infectious),
                                                     maxlen=len(func_infectious))  # representation of
             self.pop_imports = collections.deque([0] * len(func_infectious),
@@ -340,7 +444,7 @@ class ISIRmodel_SingleRun:
             self.dS_native = None
 
 
-        elif engine == 'step_standard':  ## TODO: old representation
+        elif engine == 'step_v1_constant_beta':  ## TODO: old representation
             self.pop_infectious = collections.deque([0] * t_incubation,
                                                     maxlen=t_incubation)  # representation of infectious population as a python Deque
             self.pop_imports = collections.deque([0] * t_incubation,
@@ -373,7 +477,7 @@ class ISIRmodel_SingleRun:
         if self.postprocess_to_df:
             self.output = self.post_process()
 
-    def step_standard(self, imported):
+    def step_v1_constant_beta(self, imported):
         # use standard SIR calculation
         # self.pop_infectious[0] = self.pop_infectious[0]
         self.pop_imports.appendleft(imported)  # NOTE
@@ -403,7 +507,7 @@ class ISIRmodel_SingleRun:
         self.pop_isolated += dR
         self.pop_susceptible -= dS
 
-    def step_v2(self, imported):  # this includes the E compartment
+    def step_v2_variable_beta(self, imported):  # this includes the E compartment
         self.pop_imports.appendleft(imported)
         self.s = self.pop_susceptible / self.POP_TOTAL
 
@@ -504,7 +608,7 @@ class ISIRmodel_SingleRun:
 #         arg_name_map=self.ARG_NAME_MAP)
 #
 #     if 'u_ImportsFlights' in variables:
-#         imports = self.imports_inflated[variables.pop('u_ImportsFlights')]
+#         imports = self.i_flights_scaled[variables.pop('u_ImportsFlights')]
 #     else: raise Exception('cannot generate \'imports\' variable (run_experiments_multiprocess/handle_single_run')
 #
 #     experiment = ISIRmodel_SingleRun(
