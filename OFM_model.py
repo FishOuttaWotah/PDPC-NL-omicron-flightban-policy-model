@@ -71,14 +71,14 @@ class ISIR_PolicyExperiments:
     )
 
     PARAMS_EXCLUDE_FROM_RESULTS = (
-        "u_Func_Infectious"   # a numpy array, would make the output too large
+        "u_Func_Infectious"  # a numpy array, would make the output too large
     )
 
     def __init__(self,
                  u_ImportsFunc,
                  u_TIncub: Sequence[int] = (3,),
                  u_Rzero: Sequence[float] = (1.3,),  # was 3.22 baseline
-                 u_ImportsFlights: Sequence[float]|None = (10.,),
+                 u_ImportsFlights: Sequence[float] | None = (10.,),
                  u_Func_Infectious: Sequence[Sequence[float]] | None = None,
                  u_ImportsIndirect: Sequence[float] | None = None,  # v4 (indirect entry)
                  u_ImportsOther: Sequence[pd.Series] | None = None,  # v4 (miscellaneous manual inputs)
@@ -88,27 +88,27 @@ class ISIR_PolicyExperiments:
                  c_nominal_ref_date=17,  # 17 corresponds with 26th Nov
                  c_import_scaling_mode=2,  # v3
                  c_model_engine='step_v2_variable_beta',  # v3
-                 debug_mode = False,  # v4: only runs one scenario and saves as state
-                 save_constants = False, # v4: decide whether constants are saved in the results_metadate df
+                 debug_mode=False,  # v4: only runs one scenario and saves as state
+                 save_constants=False,  # v4: decide whether constants are saved in the results_metadate df
                  ):
         self.params = locals().copy()  # get the model inputs, this WILL be modified for passing into the single model run.
         self.PARAMS_RAW = locals().copy()  # make a non-modified version of the model inputs
         self.debug_unmapped_args = []
         self.debug_mode = debug_mode
-        self.debug_experiment = None # TODO: decide if one experiment or several
+        self.debug_experiment = None  # TODO: decide if one experiment or several
         self.save_consts = save_constants
 
         # Save experiment inputs
         self.u_imports_func = u_ImportsFunc
         self.u_TIncub = u_TIncub  # incubation time
         self.u_Rzero = u_Rzero
-        self.p_flightbans = self.get_flightban_days(p_FlightBans, c_nominal_ref_date)  # TODO think about more intuitive naming
+        self.p_flightbans = self.get_flightban_days(p_FlightBans,
+                                                    c_nominal_ref_date)  # TODO think about more intuitive naming
         self.p_flightbans_map = dict([(d, p_FlightBans[i]) for i, d in enumerate(self.p_flightbans)])
         self.params['p_FlightBans'] = self.p_flightbans
         self.c_sim_time = c_SimTime
         self.c_pop_total = c_PopTotal
         self.c_nominal_ref_date = c_nominal_ref_date
-
 
         ## Handle import scaling mode
         # decides how the import function should be (up)scaled
@@ -126,7 +126,7 @@ class ISIR_PolicyExperiments:
         # Conduct scaling for import functions
         self.u_imports_flights = u_ImportsFlights
         self.u_imports_indirect = u_ImportsIndirect  # v4
-        self.c_imports_other = u_ImportsOther # v4
+        self.c_imports_other = u_ImportsOther  # v4
         if u_ImportsFunc is not None:
             if u_ImportsFlights is not None:
                 self.i_flights_scaled, self.i_flights_cumul, self.i_flights_infl_factor = self.inflate_importation_function(
@@ -142,7 +142,7 @@ class ISIR_PolicyExperiments:
                 )
         else:
             # if imports func not provided, these states are all None
-            self.i_flights_scaled = self.i_flights_cumul = self.i_flights_infl_factor = self.i_nonflights_scaled =self.i_nonflights_cumul = self.i_nonflights_infl_factor = None
+            self.i_flights_scaled = self.i_flights_cumul = self.i_flights_infl_factor = self.i_nonflights_scaled = self.i_nonflights_cumul = self.i_nonflights_infl_factor = None
             print('OFM_PE warning: No import function (u_ImportFunc) provided')
 
         # identify which params are varied or constant
@@ -153,7 +153,7 @@ class ISIR_PolicyExperiments:
             arg_name_map=self.ARG_NAME_MAP
         )
 
-        # items for saving results
+        # items for saving results_s
         self.results_metadata = {}  # todo: think should be 'scenarios?'
         self.results_verbose = {}  # instantiate empty dict for saving
         self.results_postprocess = None
@@ -207,16 +207,15 @@ class ISIR_PolicyExperiments:
 
         return p_variable, p_constant, p_none
 
-
     @staticmethod
     def filter_excluded_params(params: Dict, compare: Sequence[str] = PARAMS_EXCLUDE_FROM_MODEL):
         # keys_to_excl = set(params.keys()) - set(compare)
         return dict((k, v) for k, v in params.items() if k not in compare)
 
     @staticmethod
-    def filter_included_params(params:Dict, compare: Sequence[str] = PARAMS_INCLUDE_IN_MODEL):
+    def filter_included_params(params: Dict, compare: Sequence[str] = PARAMS_INCLUDE_IN_MODEL):
         keys_to_incl = set(params.keys()) & set(compare)
-        return dict((k,params[k]) for k in keys_to_incl)
+        return dict((k, params[k]) for k in keys_to_incl)
 
     @staticmethod
     def generate_scenarios(variables: Dict, constants: Dict,
@@ -230,7 +229,7 @@ class ISIR_PolicyExperiments:
         # scenarios = [dict(zip(variables.keys(), inputs), **constants) for inputs in itertools.product(*variables.values())]
         scenarios = []
         for vars_set in itertools.product(*variables.values()):
-            input_set = dict(zip(variables.keys(), vars_set)) #, **constants)
+            input_set = dict(zip(variables.keys(), vars_set))  # , **constants)
             scenarios.append(input_set)
 
         return scenarios
@@ -244,7 +243,8 @@ class ISIR_PolicyExperiments:
             ## Prepare experiment params for model input
             exp_params = exp_vars.copy()  # make a copy for labelling
             exp_params.update(self.params_const)  # add constants (inefficient, but makes further handling convenient)
-            mod_inputs = self.map_input_names(exp_params, arg_name_map=self.ARG_NAME_MAP) # convert from experiment-level param names to model param names
+            mod_inputs = self.map_input_names(exp_params,
+                                              arg_name_map=self.ARG_NAME_MAP)  # convert from experiment-level param names to model param names
 
             # Get scaled import function for model and drop the scaling factor value
             if 'u_ImportsFlights' in mod_inputs and self.i_flights_scaled is not None:  # if it is a variable
@@ -274,8 +274,7 @@ class ISIR_PolicyExperiments:
             # Run simulation if not in debug mode
             if not self.debug_mode:
                 experiment.run_model()
-                ## Saving results
-
+                ## Saving results_s
 
                 # save either all params or just variables
                 if self.save_consts:
@@ -285,10 +284,10 @@ class ISIR_PolicyExperiments:
                 for param_excl in self.PARAMS_EXCLUDE_FROM_RESULTS:  # exclude certain bulky params if present
                     save_params.pop(param_excl, None)
 
-                # save experiment output and metadata
+                # save experiment output and meta_s
                 self.results_verbose[exp_idx] = experiment.output.assign(**exp_vars)
-                self.results_metadata[exp_idx] = save_params # save metadata
-            elif self.debug_mode and self.debug_experiment is None: # preserve 1st experiment
+                self.results_metadata[exp_idx] = save_params  # save meta_s
+            elif self.debug_mode and self.debug_experiment is None:  # preserve 1st experiment
                 self.debug_experiment = experiment
                 break
             # else: # we only preserve one experiment
@@ -311,7 +310,7 @@ class ISIR_PolicyExperiments:
 
     @staticmethod
     def postprocess_to_df(results_verbose, map_to_invert: Dict | None = None):
-        # concatenate results into dataframe and set some added indices
+        # concatenate results_s into dataframe and set some added indices
         results_df = pd.concat(results_verbose)
         if map_to_invert is not None:  # Invert column names from model-level to experiment-level
             reverse_map = {v: k for k, v in map_to_invert.items()}
@@ -326,9 +325,9 @@ class ISIR_PolicyExperiments:
         # else:
         #     nominal_cumulative = imports.loc[:ref_date-1].sum() # note pandas end on ref_date
         inflation_factor = np.array(nominal_target) / nominal_cumulative
-        imports_inflated: pd.DataFrame = pd.concat([imports * factor for factor in inflation_factor], axis=1, keys=nominal_target)
+        imports_inflated: pd.DataFrame = pd.concat([imports * factor for factor in inflation_factor], axis=1,
+                                                   keys=nominal_target)
         return imports_inflated, nominal_cumulative, list(inflation_factor)
-
 
     @staticmethod
     def get_flightban_days(flightban_days, ref_date):
@@ -336,7 +335,8 @@ class ISIR_PolicyExperiments:
 
         non_int_check = [i for i in flightban_days if type(i) != int]  # update for v4
         if non_int_check:
-            print(f"OFM_PE Warning: {__name__} has non-integer flightban value(s) {non_int_check}. If this is intentional, do proceed.")
+            print(
+                f"OFM_PE Warning: {__name__} has non-integer flightban value(s) {non_int_check}. If this is intentional, do proceed.")
         return tuple(ref_date + delta if isinstance(delta, int) else delta for delta in flightban_days)
 
 
@@ -349,7 +349,7 @@ class ISIRmodel_SingleRun:
                  pop_total: int,
                  sim_time: int,
                  imports_flights: pd.Series | None = None,
-                 func_infectious: Sequence[float]| None = None,  ## v3
+                 func_infectious: Sequence[float] | None = None,  ## v3
                  flightban_on: int | None = None,
                  postprocess_to_df: bool = False,
                  engine: str = 'step_v1_constant_beta',
@@ -389,7 +389,8 @@ class ISIRmodel_SingleRun:
         ## Handling for case importation (updated v4)
         if imports_flights is not None:
             if flightban_on is not None:
-                imports_flights = imports_flights.loc[:flightban_on-1] # we assume no more imports on the flightban day itself
+                imports_flights = imports_flights.loc[
+                                  :flightban_on - 1]  # we assume no more imports on the flightban day itself
                 # Note: modification of input!
 
         isets_dict = {
@@ -398,11 +399,11 @@ class ISIRmodel_SingleRun:
             'others': imports_other,
         }
         import_sets = dict((label, iset) for label, iset in isets_dict.items()
-                       if iset is not None)
+                           if iset is not None)
 
         # conduct superimposed import function
         if len(import_sets) >= 1:
-            self.imports_components = pd.concat(import_sets, axis=1)
+            self.imports_components = pd.concat(import_sets, axis=1).fillna(value=0.)  # note fillna (v4.1)
             self.imports_func = self.imports_components.sum(axis=1)
         else:
             self.imports_func = {}  # empty set
@@ -432,14 +433,15 @@ class ISIRmodel_SingleRun:
         #         pass
 
         # Instantiate model states
-        self.sim_current = 0
+        self.sim_current: int = 0
         if engine == 'step_v2_variable_beta':
             if func_infectious is None:
                 raise Exception(f"OFM_model: \'step_v2_variable_beta\' model engine needs a defined func_infectious")
             self.pop_infectious = collections.deque([0] * len(func_infectious),
                                                     maxlen=len(func_infectious))  # representation of
-            self.pop_imports = collections.deque([0] * len(func_infectious),
-                                                 maxlen=len(func_infectious))
+            self.pop_imports_comps = dict(
+                    (col, collections.deque([0] * len(func_infectious),maxlen=len(func_infectious)))
+                    for col in self.imports_components.columns)
             self.dS_import = None  # TODO: debug item
             self.dS_native = None
 
@@ -464,10 +466,18 @@ class ISIRmodel_SingleRun:
         Runs model with the defined simulation engine for the defined number of steps. Handles importation input per step, and conducts a post-processed function at the end.
         """
         while self.sim_current <= self.sim_end:
-            if self.sim_current in self.imports_func:
-                imported = self.imports_func[self.sim_current]
+            if self.engine_name == 'step_v2_variable_beta':
+                if self.sim_current in self.imports_func:
+                    imported = self.imports_components.loc[self.sim_current, :]
+                else:
+                    imported = pd.Series(0., index=self.imports_components.columns)
+
             else:
-                imported = 0
+                if self.sim_current in self.imports_func:
+                    imported = self.imports_func[self.sim_current]
+
+                else:
+                    imported = 0
             self.engine(imported)
             self.sim_current += 1
 
@@ -477,57 +487,96 @@ class ISIRmodel_SingleRun:
         if self.postprocess_to_df:
             self.output = self.post_process()
 
-    def step_v1_constant_beta(self, imported):
-        # use standard SIR calculation
-        # self.pop_infectious[0] = self.pop_infectious[0]
-        self.pop_imports.appendleft(imported)  # NOTE
-        self.s = self.pop_susceptible / self.POP_TOTAL  # fraction of susceptible population
-        # adjust beta/R with susceptible fraction
-        self.beta_eff_rt = self.beta_null * self.s
-        self.r_rt = self.R_zero * self.s
-        self.record_metrics({'imported': imported,
-                             'infected_list': [round(n, 2) for n in self.pop_infectious],
-                             'infected_total': round(sum(self.pop_infectious), 2),
-                             'infected_new': round(self.pop_infectious[0], 2),
-                             'susceptible': self.pop_susceptible,
-                             'isolated': self.pop_isolated,
-                             'susceptible_r': self.s * 100,
-                             'beta_eff_rt': self.beta_eff_rt,
-                             'R_eff_rt': self.r_rt})
+    def step_v2_variable_beta(self, imported: pd.Series):  # this includes the E compartment
+        # if isinstance(imported, pd.Series):
+        #     import_comps = imported
+        #     imported = imported.sum()
+        # else:
 
-        # determine change in population for today
-        dS = min(
-            self.beta_null * self.s *
-            (sum(self.pop_infectious) + sum(self.pop_imports)),
-            self.pop_susceptible)
+        for col, dq in self.pop_imports_comps.items():
+            dq.appendleft(imported[col]) # should cast back to the original dict by reference
+        # self.pop_imports_comps.appendleft(imported)
+        self.s = self.pop_susceptible / self.POP_TOTAL
+
+        self.r_rt = self.R_zero * self.s
+        self.beta_func_rt = self.get_I_func_rt(R_eff_rt=self.r_rt)
+
+        # note we have multiple streams now
+        self.dS_import: Dict[str, float] = dict((col, np.array(dq) @ self.beta_func_rt)
+                              for col, dq in self.pop_imports_comps.items())  # @ is dot product
+        self.dS_native: float = np.array(self.pop_infectious) @ self.beta_func_rt
+        i_components = (*self.dS_import.values(), self.dS_native)  # * for unpacking
+        sum_i_comps = sum(i_components)
+        if sum_i_comps < self.pop_susceptible:
+            dS = sum_i_comps
+            dS_comps = [round(n, 2) for n in self.dS_import.values()]
+        else:
+            dS = self.pop_susceptible
+            # get ratio of contribution instead
+            dS_comps = [round((n / sum_i_comps * self.pop_susceptible), 2) for n in self.dS_import.values()]
+        # dS = min(self.dS_import + self.dS_native, self.pop_susceptible)
+
         dR = self.pop_infectious[-1]
+
+        self.record_metrics({
+            'infected_new': round(dS, 2),
+            'infected_new_imports': dS_comps,
+            'infected_new_native': round(self.dS_native, 2),
+            'infected_total': round(sum(self.pop_infectious), 2),
+            'infected_list': [round(n, 2) for n in self.pop_infectious],
+            'susceptible': self.pop_susceptible,
+            'susceptible_r': self.s * 100,
+            'isolated': self.pop_isolated,
+            'imported': imported.values,
+            # 'imported_in': [round(n, 2) for n in sum(self.pop_imports_comps.values())],
+            'R_eff_rt': self.r_rt})
 
         # update population values
         self.pop_infectious.appendleft(dS)
         self.pop_isolated += dR
         self.pop_susceptible -= dS
 
-    def step_v2_variable_beta(self, imported):  # this includes the E compartment
-        self.pop_imports.appendleft(imported)
+        # check for termination condition
+        # rate-based?
+        if self.r_rt < self.TERMINATE_BELOW_R:
+            if sum(self.pop_infectious) < self.TERMINATE_BELOW_I_TOTAL:
+                self.terminate = True
+
+    def step_v2_variable_beta_OLD(self, imported: pd.Series | float):  # this includes the E compartment
+
+        self.pop_imports_comps.appendleft(imported)
         self.s = self.pop_susceptible / self.POP_TOTAL
 
         self.r_rt = self.R_zero * self.s
         self.beta_func_rt = self.get_I_func_rt(R_eff_rt=self.r_rt)
-        self.record_metrics({'imported': imported,
-                             'imported_in': [round(n, 2) for n in self.pop_imports],
-                             'infected_list': [round(n, 2) for n in self.pop_infectious],
-                             'infected_total': round(sum(self.pop_infectious), 2),
-                             'infected_new': round(self.pop_infectious[0], 2),
-                             'susceptible': self.pop_susceptible,
-                             'isolated': self.pop_isolated,
-                             'susceptible_r': self.s * 100,
-                             'R_eff_rt': self.r_rt})
 
-        # we have two streams now
-        self.dS_import = np.array(self.pop_imports) @ self.beta_func_rt
+        # note we have two streams now
+        self.dS_import = np.array(self.pop_imports_comps) @ self.beta_func_rt  # @ is dot product
         self.dS_native = np.array(self.pop_infectious) @ self.beta_func_rt
-        dS = min(self.dS_import + self.dS_native, self.pop_susceptible)
+        i_components = (self.dS_import, self.dS_native)
+        sum_i_comps = sum(i_components)
+        if sum_i_comps < self.pop_susceptible:
+            dS = sum_i_comps
+            dS_comps = (round(n, 2) for n in i_components)
+        else:
+            dS = self.pop_susceptible
+            # get ratio of contribution instead
+            dS_comps = (round((n / sum_i_comps * self.pop_susceptible), 2) for n in i_components)
+        # dS = min(self.dS_import + self.dS_native, self.pop_susceptible)
+
         dR = self.pop_infectious[-1]
+
+        self.record_metrics({
+            'infected_new': round(dS, 2),
+            'infected_new_comps': dS_comps,
+            'infected_total': round(sum(self.pop_infectious), 2),
+            'infected_list': [round(n, 2) for n in self.pop_infectious],
+            'susceptible': self.pop_susceptible,
+            'susceptible_r': self.s * 100,
+            'isolated': self.pop_isolated,
+            'imported': imported,
+            'imported_in': [round(n, 2) for n in self.pop_imports_comps],
+            'R_eff_rt': self.r_rt})
 
         # update population values
         self.pop_infectious.appendleft(dS)
@@ -565,6 +614,35 @@ class ISIRmodel_SingleRun:
     def post_process(self):
         return pd.DataFrame.from_dict(self.record_dict, orient='index')
 
+    def step_v1_constant_beta(self, imported):
+        # use standard SIR calculation
+        # self.pop_infectious[0] = self.pop_infectious[0]
+        self.pop_imports.appendleft(imported)  # NOTE
+        self.s = self.pop_susceptible / self.POP_TOTAL  # fraction of susceptible population
+        # adjust beta/R with susceptible fraction
+        self.beta_eff_rt = self.beta_null * self.s
+        self.r_rt = self.R_zero * self.s
+        self.record_metrics({'imported': imported,
+                             'infected_list': [round(n, 2) for n in self.pop_infectious],
+                             'infected_total': round(sum(self.pop_infectious), 2),
+                             'infected_new': round(self.pop_infectious[0], 2),
+                             'susceptible': self.pop_susceptible,
+                             'isolated': self.pop_isolated,
+                             'susceptible_r': self.s * 100,
+                             'beta_eff_rt': self.beta_eff_rt,
+                             'R_eff_rt': self.r_rt})
+
+        # determine change in population for today
+        dS = min(
+            self.beta_null * self.s *
+            (sum(self.pop_infectious) + sum(self.pop_imports)),
+            self.pop_susceptible)
+        dR = self.pop_infectious[-1]
+
+        # update population values
+        self.pop_infectious.appendleft(dS)
+        self.pop_isolated += dR
+        self.pop_susceptible -= dS
 ## COLD STORAGE
 # a failed multiprocessing experiment
 

@@ -36,7 +36,8 @@ s_imports = tuple(range(15, 61, 15))
 # R_range_set1 = np.arange(20, 31, 5) / 10
 # R_range_set2 = np.arange(11, 20, 1) /10  # 1.1 till 1.9
 # R_range = sorted(list(set(R_range_set2) | set(R_range_set1)))
-R_range = tuple(np.arange(11, 31, 1) / 10)
+# R_range = tuple(np.arange(11, 31, 1) / 10)
+R_range = (1.3, 1.5, 2., 2.5, 3.)
 pop_NL = int(17.48e6)  # 17.48 million
 
 
@@ -80,67 +81,52 @@ func_serial_cdf = scipy.stats.gamma.cdf(x=x, a=a, scale=1 / rate, loc=-1)  # for
 # %%
 # run one experiment set for sensitivity with day0 policy, another for flightban policy choice
 #
-model_vers = 'v4'
-
-sim_import_scaling = False
-sim_import_indirect = True
+model_vers = 'v4.1'
+sim_reference = False
+sim_import_scaling = True
 sim_policies = False
-sim_preexisting_case = False
+# sim_import_indirect = False
+# sim_preexisting_case = False
 sim_constant_beta = False # should be equivalent to not have beta function
 
-if sim_import_scaling:
-    exps_imp_scaling = ofm.ISIR_PolicyExperiments(
+if sim_reference:
+    exps_reference = ofm.ISIR_PolicyExperiments(
         u_ImportsFunc=imports_func,
         p_FlightBans=s_flightbans,
         u_Rzero=R_range,
-        u_ImportsFlights=s_imports,
+        u_ImportsFlights=(0, 15, 30, 45, 60, 75, 90),
         u_Func_Infectious=(func_serial,),  # v2
         c_SimTime=500,
         c_model_engine='step_v2_variable_beta',  # v2
     )
-    setup_run_save_experiments(exps_imp_scaling, save_name='ImportScale', model_vers=model_vers, save_results=True)
+    setup_run_save_experiments(exps_reference, save_name='Reference', model_vers=model_vers, save_results=True)
 
-if sim_import_indirect: # variation of exps_import_scaling, with indirect flights that are not blocked
-    exps_imp_indir = ofm.ISIR_PolicyExperiments(
+if sim_import_scaling:
+    exps_imp_scaling = ofm.ISIR_PolicyExperiments(
         u_ImportsFunc=imports_func,
-        p_FlightBans=s_flightbans,
-        u_Rzero= (1.1, 1.3, 1.5, 2., 2.5, 3.),
-        u_ImportsFlights=s_imports,
-        u_ImportsIndirect=(15,30),
-        u_Func_Infectious=(func_serial,),
-        c_SimTime=500,
-        c_model_engine='step_v2_variable_beta',
-    )
-    setup_run_save_experiments(exps_imp_indir, save_name='ImportIndirect', model_vers=model_vers, save_results=True)
-
-
-if sim_preexisting_case: # variation of exps_import_scaling, but with pre-existing cases 1 week before 26th Nov
-    exps_preexisting = ofm.ISIR_PolicyExperiments(
-        u_ImportsFunc=imports_func,
-        p_FlightBans=s_flightbans,
+        p_FlightBans=(0,),
         u_Rzero=R_range,
-        u_ImportsFlights=s_imports,
-        u_ImportsOther= (pd.Series({10: 1}), pd.Series({10:10})),
-        u_Func_Infectious=(func_serial,),
+        u_ImportsFlights=(0, 15, 30, 60),
+        u_ImportsIndirect=(0, 0.5, 1, 2),
+        u_Func_Infectious=(func_serial,),  # v2
         c_SimTime=500,
-        c_model_engine='step_v2_variable_beta'
-
+        c_model_engine='step_v2_variable_beta',  # v2
+        save_constants=True,
     )
-    setup_run_save_experiments(exps_preexisting, save_name='Preexisting', model_vers=model_vers,
-                               save_results=True)
+    setup_run_save_experiments(exps_imp_scaling, save_name='ImportScale_smallindirect', model_vers=model_vers, save_results=True)
 
 if sim_policies:
     exps_policies = ofm.ISIR_PolicyExperiments(
         u_ImportsFunc=imports_func,
-        p_FlightBans=p_flightbans,
-        u_Rzero=(2.,),
-        u_ImportsFlights=(15,),
+        p_FlightBans=s_flightbans,
+        u_Rzero=(1.3, 1.5, 2., 2.5, 3.),
+        u_ImportsFlights=(15, 30,),
+        u_ImportsIndirect= range(0, 5, 1),
         u_Func_Infectious=(func_serial,),
-        c_SimTime=300,
+        c_SimTime=500,
         c_model_engine='step_v2_variable_beta'
     )
-    setup_run_save_experiments(exps_policies, save_name='Policies', model_vers=model_vers,
-                               save_results=True)
+    setup_run_save_experiments(exps_policies, save_name='Policies_small indirect', model_vers=model_vers,save_results=True)
 
 if sim_constant_beta: # variation of exps_policies but with older infectivity function (constant)
     exps_constant_beta = ofm.ISIR_PolicyExperiments(
@@ -152,8 +138,22 @@ if sim_constant_beta: # variation of exps_policies but with older infectivity fu
         c_model_engine='step_v1_constant_beta',
         c_SimTime=300,
     )
-    setup_run_save_experiments(exps_constant_beta, save_name='ConstantBeta', model_vers=model_vers,
-                               save_results=True)
+    setup_run_save_experiments(exps_constant_beta, save_name='ConstantBeta', model_vers=model_vers,save_results=True)
+
+# if sim_import_indirect: # variation of exps_import_scaling, with indirect flights that are not blocked
+#     exps_imp_indir = ofm.ISIR_PolicyExperiments(
+#         u_ImportsFunc=imports_func,
+#         p_FlightBans=s_flightbans,
+#         u_Rzero= R_range,
+#         u_ImportsFlights=s_imports,
+#         u_ImportsIndirect=(15,30),
+#         u_Func_Infectious=(func_serial,),
+#         c_SimTime=500,
+#         c_model_engine='step_v2_variable_beta',
+#     )
+#     setup_run_save_experiments(exps_imp_indir, save_name='ImportIndirect', model_vers=model_vers, save_results=True)
+
+
 
 # ** import_scaling_mode:
 # mode 1 = calibrate import function for N total imports prior to (not including) reference date
