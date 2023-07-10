@@ -1,15 +1,18 @@
-from typing import Sequence
+from __future__ import annotations
+from typing import Sequence, TYPE_CHECKING
 import pandas as pd
 import numpy as np
-import seaborn as sns
-import matplotlib.pyplot as plt
-from matplotlib.colors import TwoSlopeNorm
-import matplotlib.ticker as ticker ## special scaling stuff
-import cmasher as cmr
-import colorcet as cet
-from importlib import reload  ## for reloading packages
+# import seaborn as sns
+# import matplotlib.pyplot as plt
+# from matplotlib.colors import TwoSlopeNorm
+# import matplotlib.ticker as ticker ## special scaling stuff
+# import cmasher as cmr
+# import colorcet as cet
+# from importlib import reload  ## for reloading packages
 import pickle
-from OFM_model import ISIR_PolicyExperiments
+import functools
+if TYPE_CHECKING:
+    from OFM_model import ISIR_PolicyExperiments
 
 
 # TODO trim out unnecessary imports later
@@ -20,12 +23,25 @@ def read_experiments_from_pickle(exps_path:str):
 
     return exps_obj
 
-def add_extra_metrics(exp_obj: ISIR_PolicyExperiments,
+def add_extra_metrics(exp_obj: ISIR_PolicyExperiments|None = None,
+                      cols_to_split = ('infected_new_imports','imported'),
+                      results: pd.DataFrame | None = None,
                       ) -> pd.DataFrame:
     # convenience function
-    # metadata = pd.DataFrame.from_dict(exp_obj.results_metadata, orient='index')
-    results: pd.DataFrame = exp_obj.results_postprocess
-    results = results.reset_index(names=['exp_id', 'day'])
+    # could either take Model-level output or Experiment_postprocessed output
+    if results is None:
+        results: pd.DataFrame = exp_obj.results_postprocess
+        results = results.reset_index(names=['exp_id', 'day'])
+    else:
+        results['day'] = results.index  # append since this won't be present at Model-level output
+
+    # split out the columns for imports
+    for to_split in cols_to_split:
+        imports_split = pd.DataFrame(results[to_split].to_list())
+        col_names = [ f'{to_split}_{col}' for col in imports_split.columns]
+        results[col_names] = imports_split
+
+    results.drop(columns=list(cols_to_split), inplace=True)
 
     results['cum_infected'] = results['infected_total'] + results['isolated']
     results['cum_infected_pct'] = results['cum_infected'] / exp_obj.c_pop_total
@@ -43,6 +59,7 @@ def add_threshold_time_search(df_to_search: pd.DataFrame,
     # TODO: df_to_search is a pivoted table, include in documentation
     find_start = (df_to_search > threshold).idxmax(axis=0)
     find_end = (df_to_search.loc[::-1] > threshold).idxmax(axis=0)  # reversed search
+    find_start = df_to_search.apply(np.searchsorted, axis=1, v=threshold, side='left')
     duration = find_end - find_start
     max_value = df_to_search.max(axis=0)
     max_day = df_to_search.idxmax(axis=0)
