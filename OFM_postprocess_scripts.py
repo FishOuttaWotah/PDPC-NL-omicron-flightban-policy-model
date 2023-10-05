@@ -57,7 +57,7 @@ def add_threshold_time_search(df_to_search: pd.DataFrame,
                               df_to_add: pd.DataFrame,
                              threshold):
     # TODO: df_to_search is a pivoted table, include in documentation
-    find_start = (df_to_search > threshold).idxmax(axis=0)
+    # _find_start = (df_to_search > threshold).idxmax(axis=0)
     find_end = (df_to_search.loc[::-1] > threshold).idxmax(axis=0)  # reversed search
     find_start = df_to_search.apply(np.searchsorted, axis=1, v=threshold, side='left')
     duration = find_end - find_start

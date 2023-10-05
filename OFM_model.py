@@ -14,14 +14,21 @@ from OFM_postprocess_scripts import add_extra_metrics  # for sensitivity analysi
 This Python file contains the description of the Omicron Flights Importation Model 
 """
 
+"""
+v5.1: (selfnote) the indirect importation function (for mode 2) is considered n% of the normal importation function, 
+only applying after the flight ban (and not before).  
+
+This can be found at 2 points: the self.get_import_function method of ISIR_PolicyExperiments, 
+under 'elif self.indirect_import_mode == 2'. 
+
+"""
 
 # what ISIR was supposed to mean (Imported, Susceptible, Infected, Recovered)
-class ISIR_PolicyExperiments:  # currently v4.1
+class ISIR_PolicyExperiments:  # currently v5
     """
-    The Experiment level for the OFM model. It
-    - generates sets of experiments/scenarios,
-    - runs the experiments with the model
-    - collects the output from the model
+    Base Experiment level of the Omicron Flights model.
+    Handles the batch experiment input, creates scenarios and runs the epidemiological model with the scenarios.
+    Also handles some minor post-simulation data handling for (separate) post-processing operations
     """
 
     class INPUTS:
@@ -87,7 +94,7 @@ class ISIR_PolicyExperiments:  # currently v4.1
     )
 
     def __init__(self,
-                 u_ImportsFunc,
+                 u_ImportsFunc: pd.Series,
                  u_TIncub: Sequence[int] = (3,),
                  u_Rzero: Sequence[float] = (1.3,),  # was 3.22 baseline
                  u_ImportsFlights: Sequence[float] | None = (10.,),
@@ -97,17 +104,20 @@ class ISIR_PolicyExperiments:  # currently v4.1
                  p_FlightBans: Sequence[int | None] | None = None,
                  c_SimTime: int = 120,  # days
                  c_PopTotal: int = 17480000,  # 17.48 mil for NL
-                 c_nominal_ref_date=17,  # 17 corresponds with 26th Nov
+                 c_nominal_ref_date=17,  # 17 corresponds with 26th Nov in the importation function
                  c_import_scaling_mode=2,  # v3
                  c_model_engine='step_v2_variable_beta',  # v3
                  debug_mode=False,  # v4: only runs one scenario and saves as state
                  save_constants=True,  # v4: decide whether constants are saved in the results_metadate df
-                 s_indirect_import_mode: int = 2,  # v4.1  import mode 2 is a ratio of direct imports
+                 s_indirect_import_mode: int = 2,  # v4.1  import mode 2 is a ratio of direct import_func
                  s_starting_S_size: Sequence[float] | None = None,
                  # v4.1  reduced S compartment size (absolute numbers or fraction)
-                 sim_mode=False,
+                 sim_mode=True,  # TODO: might be depreciated
                  # v5: True to process as normal (elaborate), False eg. if passing into sensitivity analysis mode
                  ):
+
+
+
         self.params = locals().copy()  # get the model inputs, this WILL be modified for passing into the single model run.
         self.PARAMS_RAW = locals().copy()  # make a non-modified version of the model inputs
         self.debug_unmapped_args = []
@@ -133,7 +143,7 @@ class ISIR_PolicyExperiments:  # currently v4.1
         ## Handle import scaling mode
         # decides how the import function should be (up)scaled
         # 1 = scale the cumulative sum up to nominal ref date to ImportsFlights
-        # 2 = (new) scale only the imports on the nominal ref date to Importflights
+        # 2 = (new) scale only the import_func on the nominal ref date to Importflights
         self.import_scaling_mode = c_import_scaling_mode
         if c_import_scaling_mode == 1:
             self.c_import_ref_dates = slice(None, self.c_nominal_ref_date - 1)
@@ -147,35 +157,12 @@ class ISIR_PolicyExperiments:  # currently v4.1
         self.u_imports_flights = u_ImportsFlights
         self.u_imports_indirect = u_ImportsIndirect  # v4
         self.c_imports_other = u_ImportsOther  # v4
-        # if imports func not provided, these states are all None
+        # if import_func func not provided, these states are all None
         self.i_flights_scaled = self.i_flights_cumul = self.i_flights_infl_factor = self.i_nonflights_scaled = self.i_nonflights_cumul = self.i_nonflights_infl_factor = None
 
         if sim_mode:
             self.handler_flights_scaling(u_ImportsFunc, u_ImportsFlights, u_ImportsIndirect)
-            # ^ affects the 'i_' attributes defined above
-
-            # TODO: delete when verified working
-            # if u_ImportsFunc is not None:
-            #     if u_ImportsFlights is not None:
-            #         self.i_flights_scaled, self.i_flights_cumul, self.i_flights_infl_factor = self.inflate_importation_function(
-            #             imports=u_ImportsFunc,
-            #             nominal_target=self.u_imports_flights,
-            #             date_slice=self.c_import_ref_dates)
-            #
-            #     if u_ImportsIndirect is not None:
-            #         if self.indirect_import_mode == 1:
-            #             self.i_nonflights_scaled, self.i_nonflights_cumul, self.i_nonflights_infl_factor = self.inflate_importation_function(
-            #                 imports=u_ImportsFunc,
-            #                 nominal_target=self.u_imports_indirect,
-            #                 date_slice=self.c_import_ref_dates
-            #             )
-            #         elif self.indirect_import_mode == 2:  # newer mode
-            #             self.i_nonflights_scaled = True # duck type, not good practice
-            #         else: raise Exception(f'Argument \'indirect import mode\'{self.indirect_import_mode} undefined,')
-            # else:
-            #     # if imports func not provided, these states are all None
-            #     self.i_flights_scaled = self.i_flights_cumul = self.i_flights_infl_factor = self.i_nonflights_scaled = self.i_nonflights_cumul = self.i_nonflights_infl_factor = None
-            #     print('OFM_PE warning: No import function (u_ImportFunc) provided')
+            # ^ modifies the 'i_' attributes defined above.
 
             # identify which params are varied or constant
             self.params_varied, self.params_const, self.params_null = self.sort_variables(self.params)
@@ -200,8 +187,6 @@ class ISIR_PolicyExperiments:  # currently v4.1
         :return: tuple with dict of variables and dict of constants
         """
         # exclude params with defined criteria
-        # input_params = self.filter_excluded_params(input_params.copy(), ## copy() for non-destructive operations
-        #                                            compare=self.PARAMS_EXCLUDE_FROM_MODEL)
         input_params = self.filter_included_params(input_params.copy(),
                                                    compare=self.PARAMS_INCLUDE_IN_SCENARIO_GEN)
         # ^ use copy() for non-destructive operations
@@ -321,6 +306,12 @@ class ISIR_PolicyExperiments:  # currently v4.1
             print(f'OFM_PE: Debug mode on, 1 experiment initiated, but not run')
 
     def map_input_names(self, input_set: Dict, params_name_map: Dict):
+        """
+        Converts parameter names in input_set Dict keys to the target name in params_name_map
+        :param input_set: dict whose keys are to be converted
+        :param params_name_map: dict containing mapping from original names to target names
+        :return: clone of input_set, with converted keys
+        """
         # identify which args don't have a mapping
         self.debug_unmapped_args = set(input_set.keys()) - set(params_name_map)
         # if self.debug_unmapped_args:
@@ -331,6 +322,13 @@ class ISIR_PolicyExperiments:  # currently v4.1
 
     @staticmethod
     def postprocess_to_df(results_verbose, map_to_invert: Dict | None = None):
+        """
+        Converts Experiment simulation runs from list of dataframes to one single concatenated pandas DataFrame
+        :param results_verbose: list of DataFrames, from Model-level output
+        :param map_to_invert: (optional) dict containing value -> key entries, to change the name of DataFrame
+        output columns. Note that the mapping is inverse!
+        :return: pandas DataFrame of all simulation output
+        """
         # concatenate results_s into dataframe and set some added indices
         results_df = pd.concat(results_verbose)
         if map_to_invert is not None:  # Invert column names from model-level to experiment-level
@@ -340,28 +338,55 @@ class ISIR_PolicyExperiments:  # currently v4.1
 
     # inflate the importation shape for the nominal values provided
     @staticmethod
-    def inflate_importation_function(imports, nominal_target, date_slice):
-        # get cumulative imports from start of omicron detection till date of reference
-        nominal_cumulative = imports.loc[date_slice].sum()
-        # else:
-        #     nominal_cumulative = imports.loc[:ref_date-1].sum() # note pandas end on ref_date
+    def inflate_importation_function(import_func: pd.Series,
+                                     nominal_target: Sequence[int | float],
+                                     date_slice: Any):
+        """
+        (low-level method) Scale the importation function multiplicatively, based on a specific importation rate
+        within a time window.
+        E.G., we scale the entire function such that we have 15 imports (nominal_target) on Nov 26th (date_slice)
+        :param import_func: pandas Series object, describing the importation function that governs the 'shape'
+        of importation. Row indices describe the days
+        :param nominal_target: Array-like containing scaling targets to match
+        :param date_slice: pandas-accepted slice object, that represents the time window for scaling
+        :return: pd.DataFrame of scaled import functions (number of columns matching the size of nominal_target, and rows
+                matching the size of the import_func's index),
+                the sum of base imports (unscaled) within time window, and
+                list of inflation factors that were multiplied to the base import function.
+        """
+        # get sum of base imports within time window
+        nominal_cumulative = import_func.loc[date_slice].sum()
+
+        # calculate how much the import function should be multiplied to achieve the nominal targets
         inflation_factor = np.array(nominal_target) / nominal_cumulative
-        imports_inflated: pd.DataFrame = pd.concat([imports * factor for factor in inflation_factor], axis=1,
+        imports_inflated: pd.DataFrame = pd.concat([import_func * factor for factor in inflation_factor], axis=1,
                                                    keys=nominal_target)
         return imports_inflated, nominal_cumulative, list(inflation_factor)
 
-    def handler_flights_scaling(self, u_ImportsFunc, u_ImportsFlights, u_ImportsIndirect):
+    def handler_flights_scaling(self,
+                                u_ImportsFunc: pd.Series,
+                                u_ImportsFlights: Sequence[int | float],
+                                u_ImportsIndirect):
+        """
+        Takes the Experiment level input for imports (base import function, import scaling for both direct flights and
+        indirect flights) and scales the import function via 'inflate_importation_function' per import scaling params.
+        :param u_ImportsFunc: pd.Series, describing the shape of the imported cases over days
+        :param u_ImportsFlights: array of numbers describing the target importation scale for direct flights.
+        :param u_ImportsIndirect:  array of numbers describing the target importation scale for indirect flights.
+        may be handled differently depending on model-level importation mode (indirect_import_mode)
+        :return:
+        """
         if u_ImportsFunc is not None:
             if u_ImportsFlights is not None:
                 self.i_flights_scaled, self.i_flights_cumul, self.i_flights_infl_factor = self.inflate_importation_function(
-                    imports=u_ImportsFunc,
+                    import_func=u_ImportsFunc,
                     nominal_target=self.u_imports_flights,
                     date_slice=self.c_import_ref_dates)
 
             if u_ImportsIndirect is not None:
                 if self.indirect_import_mode == 1:
                     self.i_nonflights_scaled, self.i_nonflights_cumul, self.i_nonflights_infl_factor = self.inflate_importation_function(
-                        imports=u_ImportsFunc,
+                        import_func=u_ImportsFunc,
                         nominal_target=self.u_imports_indirect,
                         date_slice=self.c_import_ref_dates
                     )
@@ -370,15 +395,23 @@ class ISIR_PolicyExperiments:  # currently v4.1
                 else:
                     raise Exception(f'Argument \'indirect import mode\'{self.indirect_import_mode} undefined,')
         else:
-            # if imports func not provided, these states are all None
+            # if import_func func not provided, these states are all None
             # already handled previously, see __init__()
             # self.i_flights_scaled = self.i_flights_cumul = self.i_flights_infl_factor = self.i_nonflights_scaled = self.i_nonflights_cumul = self.i_nonflights_infl_factor = None
             print('OFM_PE warning: No import function (u_ImportFunc) provided')
 
     @staticmethod
     def get_flightban_days(flightban_days, ref_date):
+        """
+        Convert flightban days from relative to non-negative days in the importation function's time
+        axis. This is because the flightban days are described relative to the reference date
+        (which is more human-intuitive), but the importation function can only describe time in non-negative days.
+        :param flightban_days: array of flight ban days relative to the reference day
+        :param ref_date: index of reference day in the importation function
+        :return: tuple of corrected flight ban days in the importation function time axis
+        """
         # convert the (relative) flightban days
-        non_int_check = [i for i in flightban_days if type(i) != int]  # update for v4
+        non_int_check = [i for i in flightban_days if type(i) != int]  # update for v4 to handle non-numeric (eg None)
         if non_int_check:
             print(
                 f"OFM_PE Warning: {__name__} has non-integer flightban value(s) {non_int_check}. If this is intentional, do proceed.")
@@ -386,11 +419,19 @@ class ISIR_PolicyExperiments:  # currently v4.1
 
     def get_import_function(self,
                             model_inputs: Dict):  # TODO: an opaque method, consider reworking
+        """
+        Retrieves the scaled importation function from the Experiment-level's pre-calculated records.
+        Also deletes certain model entries which shouldn't be passed into the Model level.
+        :param model_inputs: Dict of model inputs, of which containing the importation scaling for direct and indirect
+        flights/entry.
+        :return: Direct importation function, Indirect importation function, and cleaned model inputs dict.
+        """
         model_inputs = model_inputs.copy()  # prevent unintended casting
+        # print(model_inputs)
         # Get scaled import function for model and drop the scaling factor value
         if 'u_ImportsFlights' in model_inputs and self.i_flights_scaled is not None:  # if it is a variable
             imports_flights = self.i_flights_scaled[
-                model_inputs.pop('u_ImportsFlights')]  # get which import function to take, and
+                model_inputs.pop('u_ImportsFlights')].copy()  # get which import function to take, and
             # ^ eliminate the entry "u_ImportsFlights", because it shouldn't be given as an input.
         else:
             model_inputs.pop('u_ImportsFlights', None)
@@ -403,10 +444,13 @@ class ISIR_PolicyExperiments:  # currently v4.1
             # todo: might have an edge condition for none imports but with indirect imports
             if self.indirect_import_mode == 1:
                 imports_indirect = self.i_nonflights_scaled[
-                    model_inputs.pop('u_ImportsIndirect')]
+                    model_inputs.pop('u_ImportsIndirect')].copy()
             elif self.indirect_import_mode == 2:
                 indirect_ratio = model_inputs.pop('u_ImportsIndirect')
-                imports_indirect = imports_flights / (1 - indirect_ratio) * indirect_ratio
+                imports_indirect = imports_flights * indirect_ratio
+                imports_indirect = imports_indirect.loc[model_inputs['flightban_on']:]
+                # assumes that
+                # imports_indirect = imports_flights / (1 - indirect_ratio) * indirect_ratio
                 # updated: such that ratio of indirect + direct = 1
             else:
                 raise NotImplementedError()
@@ -419,7 +463,7 @@ class ISIR_PolicyExperiments:  # currently v4.1
     def run_experiments_multiprocess(self,
                                      n_workers=5,
                                      postprocess_ops: Sequence | None = None
-                                     ) -> None:
+                                     ) -> bool:
         print(f'OFM_PE: Running MULTIPROCESS mode with {len(self.scenarios)} experiments')
 
         # def r_callback(result):
@@ -467,12 +511,15 @@ class ISIR_PolicyExperiments:  # currently v4.1
             self.reshape_MP_output(scenarios=self.scenarios,
                                    results=self.experiments)
 
+        return True  # TODO: why was this here again? as blocking?
+
     def handle_single_run(self,
                           idx,
                           variables,
                           constants,
                           post_ops: tuple[Callable, Dict] | None = None,
                           ):
+
         # note/document that model inputs is a tuple with (label,inputs)
         # TODO: consider optional output for meta-data, especially opaque with post-processed output.
         model_inputs = variables.copy()
@@ -481,6 +528,7 @@ class ISIR_PolicyExperiments:  # currently v4.1
             model_inputs,
             params_name_map=self.PARAMS_NAME_MAP)
 
+        # retrieves the associated scaled importation function for the scenario, plus some input cleaning
         imports_flights, imports_indirect, model_inputs = self.get_import_function(model_inputs=model_inputs)
 
         experiment = ISIRmodel_SingleRun(
@@ -489,7 +537,7 @@ class ISIR_PolicyExperiments:  # currently v4.1
             postprocess_to_df=True,  # thus a Pandas df result should be available as an attribute after simulation
             ref_day=self.c_nominal_ref_date,
             **model_inputs)
-        experiment.run_model()
+        experiment.run_model() # run model with given scenario
         for param_excl in self.PARAMS_EXCLUDE_FROM_RESULTS:
             variables.pop(param_excl, None)
         experiment.output = experiment.output.assign(**variables)
@@ -620,6 +668,7 @@ class ISIRmodel_SingleRun:
                                   :flightban_on - 1]  # we assume no more imports on the flightban day itself
                 # Note: modification of input!
 
+        self.indirect = imports_indirect  # TODO: ad hoc: delete!
         isets_dict = {
             'direct': imports_flights,
             'indirect': imports_indirect,
@@ -662,7 +711,7 @@ class ISIRmodel_SingleRun:
             self.dS_native = None
 
 
-        elif engine == 'step_v1_constant_beta':  ## TODO: old representation
+        elif engine == 'step_v1_constant_beta':  ## TODO: depreciated
             self.pop_infectious = collections.deque([0] * t_incubation,
                                                     maxlen=t_incubation)  # representation of infectious population as a python Deque
             self.pop_imports = collections.deque([0] * t_incubation,
@@ -936,11 +985,11 @@ class ISIRmodel_SingleRun:
 #         params_name_map=self.PARAMS_NAME_MAP)
 #
 #     if 'u_ImportsFlights' in variables:
-#         imports = self.i_flights_scaled[variables.pop('u_ImportsFlights')]
-#     else: raise Exception('cannot generate \'imports\' variable (run_experiments_multiprocess/handle_single_run')
+#         import_func = self.i_flights_scaled[variables.pop('u_ImportsFlights')]
+#     else: raise Exception('cannot generate \'import_func\' variable (run_experiments_multiprocess/handle_single_run')
 #
 #     experiment = ISIRmodel_SingleRun(
-#         imports_func=imports,
+#         imports_func=import_func,
 #         postprocess_to_df=True,
 #         **variables
 #     )
