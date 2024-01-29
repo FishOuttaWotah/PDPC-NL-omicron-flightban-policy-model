@@ -10,6 +10,7 @@ from SALib.analyze import sobol, fast
 from dataclasses import dataclass
 import pandas as pd
 import numpy as np
+import itertools
 
 import math
 import functools
@@ -22,6 +23,7 @@ class ISIR_SensitivityExperiments(ISIR_PolicyExperiments):  # copied from the v4
         'u_ImportsFlights': Sequence,
         'u_ImportsIndirect': Sequence,
         'p_FlightBans': Sequence,
+        'u_Func_Infectious': Sequence,
         # otherwise 'bool' for binary (#TODO think about implementation)
     }
 
@@ -42,6 +44,7 @@ class ISIR_SensitivityExperiments(ISIR_PolicyExperiments):  # copied from the v4
                  **kwargs  # for experiment inputs
                  # TODO: consider sensitivity may need their own kwargs too?
                  ):
+
         # TODO: mention that the inputs should be provided as even number for Sobol (not very sure)
         # TODO: include test for convergence with increasing metrics?? Read up convergence test methodology?
 
@@ -49,53 +52,102 @@ class ISIR_SensitivityExperiments(ISIR_PolicyExperiments):  # copied from the v4
         # some notable changes:
         # - import scaling is done later (after sampling)
         # - limitations of SALib means some transformation for int/bool inputs
-        # - generation of scenarios is done by the sampler, and not the generate_scenarios method.
+        # - generation of scenarios is done by the sensitivity sampler, and not the normal generate_scenarios method.
         # - variables are only in tuples of length 2, this defines the bounds for the SALib sampler
         # - the model outputs are already processed within this object, instead of conducted separately in a jupyter notebook.
         # TODO: make sure that the effects of discretising is documented somewhere here
-        # Discretising input factors should not affect Sobol and FAST, but will affect Morris. more info: https://waterprogramming.wordpress.com/2014/02/11/extensions-of-salib-for-more-complex-sensitivity-analyses/
+        # Discretising input factors should not affect Sobol and FAST, but will affect Morris. Source: https://waterprogramming.wordpress.com/2014/02/11/extensions-of-salib-for-more-complex-sensitivity-analyses/
 
+        # For Sobol' method, a N_samples value is recommended to be a power of 2
         # TODO: describe the convoluted reasoning why discretisation is necessary, and why the SA.evaluate method was not used and essentially bypassed
 
         super().__init__(**kwargs)  # instantiate base model object
 
         ## sort variables and constants
         self.params_varied, self.params_const, self.params_null = self.sort_variables(self.params)
-        self._SA_SCENARIOS_GENERATED = False  # check to see if the problem sampling is already parsed and converted into scenario form
+        self._SA_SCENARIOS_GENERATED = False  # check to see if the problem sampling is already parsed and
+        # converted into scenario form
+        self._SA_SAMPLED = False # check to see if the problem sampling was conducted before running? currently a dummy
+
+        # New SA code
+        self._params_v_sample_range = self.discretise_generate_sample_range(params_to_check=self.params_varied)
+        ## Create SA Problem object, a SALib object that contains all relevant information for SA run.
+        self.problem = self.generate_SALib_ProblemSpec(params=self._params_v_sample_range)
+
 
         # Dumb check if none of the main arguments were defined
         if run_sa:
             self._sampler_args = sampler_args
-            sa_method = sa_method.lower()  # convert to lower case
+            # sa_method = sa_method.lower()  # convert to lower case
             self._n_samples = n_samples
+            self._sa_method = sa_method
+            self._sampler = None
+            self._analyser = None
+            self._samples_discretised = None
 
             # get the names of outputs that are used in the pre-defined post-processing ops (find in Experiment level)9
             # self._sa_outputs =  [post_op[1]['return_name'] for post_op in self.setup_postprocessing()]
 
-            # handle SA method
-            self._sa_method = sa_method
-            if sa_method in self.DEFAULT_SAMPLERS:
-                self._sampler = self.DEFAULT_SAMPLERS[sa_method]['sampler']
-                self._analyser = self.DEFAULT_SAMPLERS[sa_method]['analyser']
-            else:
-                raise NotImplementedError("Haven\'t implemented different SA method handling yet")
+            # retrieve SA method
+            # self._sa_method = sa_method
+            # if sa_method in self.DEFAULT_SAMPLERS:
+            #     self._sampler = self.DEFAULT_SAMPLERS[sa_method]['sampler']
+            #     self._analyser = self.DEFAULT_SAMPLERS[sa_method]['analyser']
+            # else:
+            #     raise NotImplementedError("Haven\'t implemented different SA method handling yet")
 
             ## generate set of variables that need to be discretised for SALib's problem definition
-            self._params_v_sample_range = self.discretise_generate_sample_range(params_to_check=self.params_varied)
-            # error_dict = {}
-            # for k, v in self.params_varied.items():
-            #     if len(v) != 2:
-            #         error_dict[k] = v
-            #
-            # if error_dict:
-            #     raise Exception(f'Variables need to be in size 2 for SALib Problem definition. \n{error_dict}')
-            #
-            self.problem = self.generate_SALib_ProblemSpec(params=self._params_v_sample_range)
-            self.problem = self.problem.sample(func=self._sampler, N=self._n_samples)  # create SA samples
-            self._samples_discretised, self.scenarios = self.postsample_rediscretise_repackage_to_scenarios(
-                sa_problem=self.problem)  # convert SA samples to Experiment-level scenarios
+            # self._params_v_sample_range = self.discretise_generate_sample_range(params_to_check=self.params_varied)
+            ## Create SA Problem object, a SALib object that contains all relevant information for SA run.
+            # self.problem = self.generate_SALib_ProblemSpec(params=self._params_v_sample_range)
+
+            # extract the following?
+            # self.problem = self.problem.sample(func=self._sampler, N=self._n_samples,
+            #                                    **self._sampler_args)  # create SA samples
+            # self._samples_discretised, self.scenarios = self.postsample_rediscretise_repackage_to_scenarios(
+            #     sa_problem=self.problem)  # convert SA samples to Experiment-level scenarios
 
             # not sure what's the output format for SALib would provide if multiple outputs are provided
+
+    def sample_ff(self):
+        # conducts a full-factorial sample
+
+        self.problem.samples = self.handler_sampler_ff()
+        self._samples_discretised, self.scenarios = self.postsample_rediscretise_repackage_to_scenarios(
+            sa_problem=self.problem
+        )
+
+    def handler_sampler_ff(self):
+        # generate full-factorial samples array
+        # self.generate_scenarios(variables = None)  # insert ordinal variables surrogate?
+        # think about repacking into labelled dict -> or is already done in a different function
+        # need to generate full-factorial x array
+        return np.array(list(itertools.product(*list(range(*b) for b in self.problem['bounds']))))
+
+    def sample(self):
+
+        # Separated the Sampling aspect of SA so that given-data approaches are accepted
+        # get the names of outputs that are used in the pre-defined post-processing ops (find in Experiment level)9
+        # self._sa_outputs =  [post_op[1]['return_name'] for post_op in self.setup_postprocessing()]
+
+        # retrieve SA method
+        # self._sa_method = sa_method
+        if self._sa_method in self.DEFAULT_SAMPLERS:
+            self._sampler = self.DEFAULT_SAMPLERS[self._sa_method]['sampler']
+            self._analyser = self.DEFAULT_SAMPLERS[self._sa_method]['analyser']
+        else:
+            raise NotImplementedError("Haven\'t implemented different SA method handling yet")
+
+        ## generate set of variables that need to be discretised for SALib's problem definition
+        self._params_v_sample_range = self.discretise_generate_sample_range(params_to_check=self.params_varied)
+        self.problem = self.generate_SALib_ProblemSpec(params=self._params_v_sample_range)
+
+        # append new attributes to Problem
+        self.problem = self.problem.sample(func=self._sampler, N=self._n_samples,
+                                           **self._sampler_args)  # create SA samples
+        self._samples_discretised, self.scenarios = self.postsample_rediscretise_repackage_to_scenarios(
+            sa_problem=self.problem)  # convert SA samples to Experiment-level scenarios
+
 
     def ISIR_evaluate_mp(self, n_workers: int = 5):
         #
@@ -108,8 +160,8 @@ class ISIR_SensitivityExperiments(ISIR_PolicyExperiments):  # copied from the v4
                                           postprocess_ops=self.setup_postprocessing())
         self.convert_experiments_to_SA_outputs()  # quick and dirty operation
 
-    def ISIR_analyse(self):
-        self.problem.analyze(self._analyser)
+    def ISIR_analyse(self, **kwargs):
+        self.problem.analyze(self._analyser, **kwargs)
         return self.problem.analyze
 
     def convert_experiments_to_SA_outputs(self):
@@ -121,7 +173,8 @@ class ISIR_SensitivityExperiments(ISIR_PolicyExperiments):  # copied from the v4
 
     def postsample_rediscretise_repackage_to_scenarios(self, sa_problem: SALib.ProblemSpec):
         """
-        Convenience function that takes the SALib Problem's samples, converts the continuous samples back into the
+        Convenience post-sampling, pre-simulation function that
+        takes the SALib Problem's samples, converts the continuous samples back into the
         discrete forms, and packages them into the expected input datatype for the ISIR_experiments
         :param sa_problem: SALib Problem object
         :return: tuple with discretised samples (as dataframe) and in samples in scenarios form (as dict)
@@ -148,6 +201,11 @@ class ISIR_SensitivityExperiments(ISIR_PolicyExperiments):  # copied from the v4
         :return: a similar dict to the input dict, but the discrete variables will have been converted to a tuple of
         (0, N) for the SA problem definition and sampling purposes.
         """
+        # Depreciated?
+        inclusion_check = set(params_to_check.keys()) - set(self.PARAMS_DISCRETISE.keys())
+        if inclusion_check:
+            raise self.DISCRETISE_FORM_ERROR(inclusion_check)
+
         params_discretise = set(params_to_check.keys()) & set(self.PARAMS_DISCRETISE.keys())
 
         params_out = params_to_check.copy()  # to avoid overwriting the original
@@ -243,6 +301,17 @@ class ISIR_SensitivityExperiments(ISIR_PolicyExperiments):  # copied from the v4
                                    outputs: Sequence[str] = None,
                                    dists: Sequence[str] = None  # distributions (uniform, lognorm, etc.)
                                    ):
+        """
+        Generate automated SALib ProblemSpec (aka 'problem') object
+        :param params: labels of parameters and their associated parameter range. For discretised parameters,
+        discretisation operations happen before this method such that the SALib's continuous sampling method works,
+        by generating an artificial continuous sampling range and converting the samples to discrete array indices.
+        :param groups: Categorical groups that describe mutually-exclusive areas of parameter space
+        :param outputs: output metrics for model/function run. Expects singular values instead of eg. large experiment
+        objects.
+        :param dists: sampling distributions for params, eg. uniform, lognorm. Defaults to uniform
+        :return:
+        """
         names = list(params.keys())  # list() constructor needed to convert from DictArray form
         num_vars = len(names)
         # create numpy 2d array of size 'num_vars' rows x 2 columns
@@ -261,83 +330,9 @@ class ISIR_SensitivityExperiments(ISIR_PolicyExperiments):  # copied from the v4
 
     @staticmethod
     def DISCRETISE_FORM_ERROR(discretise_form):
+        # Shows a pre-emptive error if (custom) discretisation instructions are not provided, because the multiprocessing
+        # environment doesn't handle errors very well
         return Exception(
-            f"Discretise form {discretise_form} not recognised, please check the PARAMS_DISCRETISE"
+            f"Discretise form {discretise_form} not recognised/present, please check the PARAMS_DISCRETISE "
             f"attribute and add handling to the \'discretise_generate_sample_range()\' and/or "
-            f"\'discretise_read()\' method")
-
-    # def ISIR_evaluate_single(self,
-    #                          vars_args: np.ndarray,
-    #                          vars_keys: Sequence[str],
-    #                          consts: Dict,
-    #                          ):
-    #     # wrapper for single-run
-    #     # get keys again
-    #     variables = dict(zip(vars_keys, vars_args))
-    #     keys_discretised = list(set(vars_keys) & set(self.PARAMS_DISCRETISE.keys()))
-    #     # include parse for discretised input
-    #     if keys_discretised:  # not empty
-    #         # map the argument back to the defined form
-    #         variables = self.discretise_read(keys_discretised,
-    #                                          problem_sample=variables)
-    #
-    #     # Packaging model inputs
-    #     params_all = variables.copy()  # same as in Experiments.run_experiments
-    #     params_all.update(consts)
-    #     params_all = self.map_input_names(params_all,
-    #                                       params_name_map=self.PARAMS_NAME_MAP)  # rename params to model-specific names (Experiment level)
-    #
-    #     ## Get import functions
-    #     imports_flights, imports_indirect, params_all = self.get_import_function(
-    #         params_all)  # get_import_function at Experiment level
-    #
-    #     experiment = ISIRmodel_SingleRun(
-    #         imports_flights=imports_flights,
-    #         imports_indirect=imports_indirect,
-    #         postprocess_to_df=True,
-    #         ref_day=self.c_nominal_ref_date,
-    #         **params_all)
-    #
-    #     experiment.run_model()
-    #
-    #     # think about data handling
-    #
-    #     # TODO: note that flight importation is discrete now again
-    #     # TODO: note that flight importation needs to be cleared in the experiment call
-    #
-    #     return  # should return metrics?
-    #
-    # # TODO: include _sampler method
-    #
-    # # TODO: make output metric (might need to be present in the experiment/model level?)
-    #
-    # # TODO: consider issue with non-singular output?
-
-# def discretise_read_1sample(self,
-#                        problem_varnames: Sequence[str],
-#                        problem_sample: np.ndarray):  # reads for single case
-#        # TODO: unverified yet. Probably not necessary?
-#        # do bulk discretisation per sample. Might be depreciated
-#        # correct for edge case
-#        problem_sample = problem_sample.copy()  # prevent overwrite of original
-#        for idx, varname in enumerate(problem_varnames):
-#            val = problem_sample[idx]
-#
-#            problem_sample[idx] = self.discretise_read_basic(varname=varname, vals=val)
-#            # # recall
-#            # args_original = self.params_varied[key]
-#            # arg_discretised = problem_sample[key]
-#            # discretise_form = self.PARAMS_DISCRETISE[key]  # whether the original is a discrete sequence or bool
-#            # if discretise_form == Sequence:
-#            #     idx: int = math.trunc(arg_discretised)
-#            #     # edge case correction (from linspace), TODO document!
-#            #     if idx == len(args_original):
-#            #         idx -= 1  # eg.
-#            #     arg_corrected = args_original[idx]
-#            # elif discretise_form == bool:
-#            #     arg_corrected = round(arg_discretised)
-#            # else:
-#            #     raise self.DISCRETISE_FORM_ERROR(discretise_form)  # error handling
-#            # problem_sample[varname] = arg_corrected
-#
-#        return problem_sample
+            f"\'discretise_read()\' method in Sensitivity Experiments class")

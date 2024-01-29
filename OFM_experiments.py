@@ -10,12 +10,6 @@ import OFM_model as ofm
 import pandas as pd
 import numpy as np
 import itertools
-import seaborn as sns
-import matplotlib.pyplot as plt
-from matplotlib.colors import TwoSlopeNorm
-import cmasher as cmr
-import colorcet as cet
-from importlib import reload  ## for reloading packages
 import pickle
 import scipy
 
@@ -30,15 +24,9 @@ ref_day = imports_df.loc[imports_df['date'] == '2021-11-26', :].index[0]  # get 
 # axis of imports function (for reliability)
 
 
-p_flightbans = tuple([*range(-7, 15, 1), None])  # + no policy
-# s_imports = tuple(range(15, 61, 15))
+# p_flightbans = tuple([*range(-7, 15, 1), None])  # + no policy
 
-# R_range_set1 = np.arange(20, 31, 5) / 10
-# R_range_set2 = np.arange(11, 20, 1) /10  # 1.1 till 1.9
-# R_range = sorted(list(set(R_range_set2) | set(R_range_set1)))
-# R_range = tuple(np.arange(11, 31, 1) / 10)
-# R_range = (1.3, 1.5, 2., 2.5, 3.)
-R_range = list(np.arange(12, 18, 1) / 10)  + [2., 2.5]
+R_range = list(np.arange(12, 18, 1) / 10) + [2., 2.5]
 pop_NL = int(17.48e6)  # 17.48 million
 
 
@@ -65,7 +53,6 @@ def setup_run_save_experiments(
     print(f'saved experiment outputs: model{model_vers}_exps_{save_name}')
 
 
-
 # %%
 # generate infectious distribution (from An der Heiden's serial interval) for v2
 """
@@ -76,42 +63,54 @@ It uses the serial interval distribution for the Omicron infections to represent
 
 *serial interval = time interval between symptom onset of index case, to symptom onset of subsequent case
 """
-# available_distributions = {
-#     'alpha': (2.0, 0.44),
-#     'delta': (2.11, 0.50),
-#     'omicron': (2.14, 0.59)
-# }
+available_distributions = {
+    'alpha': (2.0, 0.44),  # *
+    'delta': (2.11, 0.50),  # *
+    'omicron': (2.14, 0.59),  # *
+    'omi_high1': (2.29, 0.6676),
+    'omi_high2': (2.45, 0.7453),
+    'omi_high3':(2.59,0.8229),
+    # 'omi_low1': (1.99, 0.5124),
+    # 'omi_low2': (1.85, 0.4347)
+} #*list of gamma function parameters from An der Heiden and Buchholz 2022
 a = 2.14
 rate = .59
-x = range(0, 13, 1)  # ends on the 13th day in Pythonic count
+x = range(0, 14, 1)  # default: ends on the 13th day in Pythonic count
 
-func_serial = scipy.stats.gamma.pdf(x=x, a=a, scale=1 / rate, loc=-1)  # loc '-1' is the cutoff
+func_serial = 'omicron',scipy.stats.gamma.pdf(x=x, a=a, scale=1 / rate, loc=-1)  # loc '-1' is the cutoff
 func_serial_cdf = scipy.stats.gamma.cdf(x=x, a=a, scale=1 / rate, loc=-1)  # for illustration
 # Note: truncation of day 0 entry since model calculation is for 'next day cases'.
+# create alternative infection functions (derived from SA)
+func_serial_variable_pdf = tuple((name, scipy.stats.gamma.pdf(x=x, a=params[0], scale=1/params[1], loc=-1)) for name, params in available_distributions.items())
+func_serial_variable_cdf = tuple(scipy.stats.gamma.cdf(x=x, a=ax, scale=1/rx, loc=-1) for ax,rx in available_distributions.values())
 # %%
 # run one experiment set for sensitivity with day0 policy, another for flightban policy choice
 #
-model_vers = 'v5.2b'  # v5 for multiprocessing and adjustments,  v5.1 for change in indirect importation application
-sim_reference = False
-sim_import_scaling = False
-sim_policies = False
-sim_policies_indirect = False
+model_vers = 'v6'
+# naming for organisation
+# v6: added simplified calculation for Model (step_v2b) that does not reduce infectivity from remaining proportion of susceptible population
+# v5.2d: test effect of different truncation point for infectious function
+# v5.2c2: test change to infection function math: no normalisation done
+# v5.2c1: temporary build for a minor Model-level math optimisation
+# v5.2c: minor math correction for 2% leakage factor (2% of direct imports, not all).
+# v5 for multiprocessing and adjustments,  v5.1 for change in indirect importation application
+
+# ** import_scaling_mode:
+# mode 1 = calibrate import function for N total imports prior to (not including) reference date
+# mode 2 = calibrate import function for N total imports only on the reference date
+model_engine = 'step_v2b_variable_beta_constant_R'  # addition for v6
+sim_import_scaling = True
+sim_policies = True
+sim_policies_indirect = True
+sim_different_scaling = False
+sim_different_Ifunc = False
 
 if __name__ == "__main__":
-    ## Reference case: not deemed important anymore
-    # if sim_reference:
-    #     exps_reference = ofm.ISIR_PolicyExperiments(
-    #         u_ImportsFunc=imports_func,
-    #         p_FlightBans=p_flightbans,
-    #         u_Rzero=R_range,
-    #         u_ImportsFlights=(15, 30,),
-    #         u_ImportsIndirect=(0, 0.2),
-    #         u_Func_Infectious=(func_serial,),  # v2
-    #         c_SimTime=150,
-    #         c_model_engine='step_v2_variable_beta',  # v2
-    #         c_nominal_ref_date=ref_day,
-    #     )
-    #     setup_run_save_experiments(exps_reference, save_name='Reference', model_vers=model_vers, save_results=True)
+    # make directory if model_version directory not present
+    save_path = f'output_figures/{model_vers}'
+    if not os.path.exists(save_path):
+        os.makedirs(save_path)
+        print(f"Created new directory in 'data_output' with label {model_vers}")
 
     if sim_import_scaling:
         exps_imp_scaling = ofm.ISIR_PolicyExperiments(
@@ -119,10 +118,10 @@ if __name__ == "__main__":
             p_FlightBans=(0,),
             u_Rzero=R_range,
             u_ImportsFlights=(15, 30, 60),
-            u_ImportsIndirect=(0, 0.1, 0.2, 0.3),
+            u_ImportsIndirect=(0, 0.118, 0.216, 0.314),
             u_Func_Infectious=(func_serial,),  # v2
             c_SimTime=150,
-            c_model_engine='step_v2_variable_beta',  # v2
+            c_model_engine=model_engine,  # v2
             save_constants=True,
             c_nominal_ref_date=ref_day,
         )
@@ -137,42 +136,58 @@ if __name__ == "__main__":
             u_ImportsIndirect=(0.118,),
             u_Func_Infectious=(func_serial,),
             c_SimTime=150,
-            c_model_engine='step_v2_variable_beta',
+            c_model_engine=model_engine,
             c_nominal_ref_date=ref_day,
         )
 
-        setup_run_save_experiments(exps_policies, save_name='Policies', model_vers=model_vers,save_results=True)
+        setup_run_save_experiments(exps_policies, save_name='Policies', model_vers=model_vers, save_results=True)
 
-    # if sim_constant_beta: # variation of exps_policies but with older infectivity function (constant)
-    #     exps_constant_beta = ofm.ISIR_PolicyExperiments(
-    #         u_ImportsFunc=imports_func,
-    #         p_FlightBans=p_flightbans,
-    #         u_Rzero=(2.,),
-    #         u_ImportsFlights=(15,),
-    #         u_TIncub=(3,),
-    #         c_model_engine='step_v1_constant_beta',
-    #         c_SimTime=300,
-    #     )
-    #     setup_run_save_experiments(exps_constant_beta, save_name='ConstantBeta', model_vers=model_vers,save_results=True)
-
-    if sim_policies_indirect: # variation of exps_import_scaling, with indirect flights that are not blocked
+    if sim_policies_indirect:  # variation of exps_import_scaling, with indirect flights that are not blocked
         exps_imp_indir = ofm.ISIR_PolicyExperiments(
             u_ImportsFunc=imports_func,
-            p_FlightBans= list(range(-2, 28, 1))+ [500],  # 500 = no policy
-            u_Rzero=(1.1, 1.3,1.5, 1.7, 2.0),
+            p_FlightBans=list(range(-2, 28, 1)) + [500],  # 500 = no policy
+            u_Rzero=(1.1, 1.3, 1.5, 1.7, 2.0),
             u_ImportsFlights=(15,),
             u_ImportsIndirect=(0.0, 0.02, 0.118, 0.216),
             u_Func_Infectious=(func_serial,),
             c_SimTime=150,
-            c_model_engine='step_v2_variable_beta',
+            c_model_engine=model_engine,
             save_constants=True,
             c_nominal_ref_date=ref_day,
         )
-        # exps_imp_indir.run_experiments_multiprocess(n_workers=5)
-        # with open(f'data_output/modelv5_exps_PoliciesIndirect.pickleobject', 'wb') as savefile:
-        #     pickle.dump(exps_imp_indir, savefile)
-        setup_run_save_experiments(exps_imp_indir, save_name='Policies and Indirect', model_vers=model_vers, save_results=True)
+        setup_run_save_experiments(exps_imp_indir, save_name='Policies and Indirect', model_vers=model_vers,
+                                   save_results=True)
 
-# ** import_scaling_mode:
-# mode 1 = calibrate import function for N total imports prior to (not including) reference date
-# mode 2 = calibrate import function for N total imports only on the reference date
+
+    if sim_different_scaling:  # variation of exps_import_scaling, with indirect flights that are not blocked
+        exps_imp_indir = ofm.ISIR_PolicyExperiments(
+            u_ImportsFunc=imports_func,
+            p_FlightBans=list(range(-2, 28, 1)) + [500],  # 500 = no policy
+            u_Rzero=(1.1, 1.3, 1.5, 1.7, 2.0),
+            u_ImportsFlights=(5, 10, 15, 20, 25, 30),
+            u_ImportsIndirect=(0.118,),
+            u_Func_Infectious=(func_serial,),
+            c_SimTime=200,
+            c_model_engine=model_engine,
+            save_constants=True,
+            c_nominal_ref_date=ref_day,
+        )
+        setup_run_save_experiments(exps_imp_indir, save_name='Policies+R+Scaling', model_vers=model_vers,
+                                   save_results=True)
+
+    if sim_different_Ifunc:  # variation of exps_import_scaling, with indirect flights that are not blocked
+        exps_imp_indir = ofm.ISIR_PolicyExperiments(
+            u_ImportsFunc=imports_func,
+            p_FlightBans=list(range(-2, 28, 1)) + [500],
+            u_Rzero=(1.1, 1.3, 1.5, 1.7, 2.0),
+            u_ImportsFlights=(15,),
+            u_ImportsIndirect=(0.118,),
+            u_Func_Infectious=func_serial_variable_pdf,
+            c_SimTime=200,
+            c_model_engine=model_engine,
+            save_constants=True,
+            c_nominal_ref_date=ref_day,
+        )
+        setup_run_save_experiments(exps_imp_indir, save_name='IFunc', model_vers=model_vers,
+                                   save_results=True)
+

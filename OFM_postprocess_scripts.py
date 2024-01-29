@@ -43,8 +43,9 @@ def add_extra_metrics(exp_obj: ISIR_PolicyExperiments|None = None,
 
     results.drop(columns=list(cols_to_split), inplace=True)
 
-    results['cum_infected'] = results['infected_total'] + results['isolated']
-    results['cum_infected_pct'] = results['cum_infected'] / exp_obj.c_pop_total
+    if 'cum_infected' not in results.columns:  # ad hoc hack
+        results['cum_infected'] = results['infected_total'] + results['isolated']
+        results['cum_infected_pct'] = results['cum_infected'] / exp_obj.c_pop_total
     # elapsed day from nominal day (not policy start day!)
     results['elapsed_nominal'] = results['day'] - exp_obj.c_nominal_ref_date
     results['elapsed_policy'] = results['day'] - results.p_FlightBans

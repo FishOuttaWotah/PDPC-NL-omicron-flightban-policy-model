@@ -7,6 +7,7 @@ from multiprocessing import Pool
 import time, warnings
 import tqdm  # for multiprocessing progress bar
 import functools
+import traceback
 
 from OFM_postprocess_scripts import add_extra_metrics  # for sensitivity analysis
 
@@ -22,6 +23,7 @@ This can be found at 2 points: the self.get_import_function method of ISIR_Polic
 under 'elif self.indirect_import_mode == 2'. 
 
 """
+
 
 # what ISIR was supposed to mean (Imported, Susceptible, Infected, Recovered)
 class ISIR_PolicyExperiments:  # currently v5
@@ -108,15 +110,13 @@ class ISIR_PolicyExperiments:  # currently v5
                  c_import_scaling_mode=2,  # v3
                  c_model_engine='step_v2_variable_beta',  # v3
                  debug_mode=False,  # v4: only runs one scenario and saves as state
-                 save_constants=True,  # v4: decide whether constants are saved in the results_metadate df
+                 save_constants=True,  # v4: decide whether constants are saved in the results_metadate ref
                  s_indirect_import_mode: int = 2,  # v4.1  import mode 2 is a ratio of direct import_func
                  s_starting_S_size: Sequence[float] | None = None,
                  # v4.1  reduced S compartment size (absolute numbers or fraction)
                  sim_mode=True,  # TODO: might be depreciated
                  # v5: True to process as normal (elaborate), False eg. if passing into sensitivity analysis mode
                  ):
-
-
 
         self.params = locals().copy()  # get the model inputs, this WILL be modified for passing into the single model run.
         self.PARAMS_RAW = locals().copy()  # make a non-modified version of the model inputs
@@ -469,8 +469,9 @@ class ISIR_PolicyExperiments:  # currently v5
         # def r_callback(result):
         #     print(result, flush=True)
 
-        def r_error(error):
-            raise Exception(error)
+        def r_error(e):
+            traceback.print_exception(type(e), e, e.__traceback__)  # some more details from child process error
+            raise Exception(e)
 
         # dumb sanity check
         # if self.experiments is not None:
@@ -483,26 +484,32 @@ class ISIR_PolicyExperiments:  # currently v5
 
         # Create multiprocessing job pool and assign simulation tasks
         with multiprocessing.Pool(n_workers) as pool, tqdm.tqdm(total=len(self.scenarios)) as pbar:
+            try:
+                for idx, inputs in self.scenarios.items():
+                    if postprocess_ops is not None:  # turn on postprocessing operations. Outputs will be different
+                        args = (idx, inputs, self.params_const, postprocess_ops)
+                    else:  # only return model iterations and model outputs
+                        args = (idx, inputs, self.params_const)
 
-            for idx, inputs in self.scenarios.items():
-                if postprocess_ops is not None:  # turn on postprocessing operations. Outputs will be different
-                    args = (idx, inputs, self.params_const, postprocess_ops)
-                else:  # only return model iterations and model outputs
-                    args = (idx, inputs, self.params_const)
+                    # create single async job with a callback that updates the progress bar UI
+                    j = pool.apply_async(
+                        func=self.handle_single_run,
+                        # handling function that will take the inputs and pass them into the
+                        # single model run
+                        args=args,  # list of arguments, note cannot handle kwargs
+                        callback=lambda _: pbar.update(1),  # update script for progress bar
+                        error_callback=r_error
+                    )  # returns an AsyncResult object
+                    jobs.append(j)
 
-                # create single async job with a callback that updates the progress bar UI
-                j = pool.apply_async(
-                    func=self.handle_single_run,  # handling function that will take the inputs and pass them into the
-                    # single model run
-                    args=args,  # list of arguments, note cannot handle kwargs
-                    callback=lambda _: pbar.update(1),  # update script for progress bar
-                    error_callback=r_error
-                )  # returns an AsyncResult object
-                jobs.append(j)
-
-            pool.close()  # close submission of jobs (not strictly necessary)
-            self.experiments = [j.get() for j in jobs]  # check and block until all experiment jobs are done
-            # ^ a bit of black magic, apparently get() is blocking
+                pool.close()  # close submission of jobs (not strictly necessary)
+                self.experiments = [j.get() for j in jobs]  # check and block until all experiment jobs are done
+                # ^ a bit of black magic, apparently get() is blocking
+            except Exception as e:
+                pool.terminate()
+                pool.join()
+                print('Exception encountered')
+                raise e
 
         print(f'OFM_PE: all experiments completed at {round((time.time() - start_time) / 60, 2)} mins')
 
@@ -534,13 +541,14 @@ class ISIR_PolicyExperiments:  # currently v5
         experiment = ISIRmodel_SingleRun(
             imports_flights=imports_flights,
             imports_indirect=imports_indirect,
-            postprocess_to_df=True,  # thus a Pandas df result should be available as an attribute after simulation
+            postprocess_to_df=True,  # thus a Pandas ref result should be available as an attribute after simulation
             ref_day=self.c_nominal_ref_date,
             **model_inputs)
-        experiment.run_model() # run model with given scenario
+        experiment.run_model()  # run model with given scenario
         for param_excl in self.PARAMS_EXCLUDE_FROM_RESULTS:
             variables.pop(param_excl, None)
-        experiment.output = experiment.output.assign(**variables)
+            constants.pop(param_excl, None)
+        experiment.output = experiment.output.assign(**variables, **constants)
 
         if post_ops is not None:  # if postprocessing operations are provided
             # add useful metrics such as cumulative cases, elapsed time
@@ -621,14 +629,16 @@ class ISIRmodel_SingleRun:
                  pop_total: int,
                  sim_time: int,
                  imports_flights: pd.Series | None = None,
-                 func_infectious: Sequence[float] | None = None,  ## v3
+                 # func_infectious: Sequence[float] | None = None,  ## v3
+                 func_infectious: Dict[str, Sequence[float]] | Sequence[float] | None = None,  # v6 change
                  flightban_on: int | None = None,
                  postprocess_to_df: bool = False,
-                 engine: str = 'step_v1_constant_beta',
+                 engine: str = 'step_v2b_variable_beta_constant_R',
                  imports_indirect: pd.Series | None = None,  # added v4
                  imports_other: pd.Series | None = None,  # added v4
                  starting_S=None,  # added v4.1
                  ref_day=None,  # added v4.1
+                 stop_cumulative = 10000, # added v6, for stopping simulation when a cumulative value is applied
                  ):
 
         # make copy of model inputs
@@ -648,18 +658,23 @@ class ISIRmodel_SingleRun:
         self.t_inc = t_incubation
         self.POP_TOTAL = pop_total  # constant
         self.starting_S = starting_S
+        self.stop_cumulative = stop_cumulative
 
         self.sim_end = sim_time + ref_day  # nominal simulation end if termination condition is not met
         self.flight_ban: int | None | bool = flightban_on
         self.postprocess_to_df: bool = postprocess_to_df
-        self.FUNC_INFECTIOUS = func_infectious  # describes the weights of variable beta in I compartment
+        # describes the weights of variable beta in I compartment
+
+        self.FUNC_INFECTIOUS_NAME, self.FUNC_INFECTIOUS_BASE = func_infectious  # original un-corrected weights
+        # self.FUNC_INFECTIOUS = np.array(func_infectious)
+        self.FUNC_INFECTIOUS = self.FUNC_INFECTIOUS_BASE / sum(self.FUNC_INFECTIOUS_BASE)  # normalisation  TODO: sensitive!
         self.beta_func_rt = None  # model state
 
         # v2: early terminate conditions  (think: what is a good determinant?)
         self.TERMINATE_BELOW_R = .5  # if R-eff-rt is below this value, start checking for next termination condition
         self.TERMINATE_BELOW_I_TOTAL = 1.  # if total infectious compartment is less than this, terminate
         # self.TERMINATE_AFTER_CONSECUTIVE_DS =   (10, 0)
-        self.terminate = False  # TODO: NEW, for early termination
+        self.terminate = False  # for early termination
 
         ## Handling for case importation (updated v4)
         if imports_flights is not None:
@@ -699,15 +714,17 @@ class ISIRmodel_SingleRun:
         self.r_rt = 0  # rt = real-time (ie. for that day)
         self.beta_eff_rt = 0
         self.beta_null = self.get_beta_null()  # uses u__R_eff and t_inc
-        if engine == 'step_v2_variable_beta':
+        if engine == 'step_v2_variable_beta' or engine == 'step_v2b_variable_beta_constant_R':
             if func_infectious is None:
                 raise Exception(f"OFM_model: \'step_v2_variable_beta\' model engine needs a defined func_infectious")
-            self.pop_infectious = collections.deque([0] * len(func_infectious),
-                                                    maxlen=len(func_infectious))  # representation of
+            # generate a deque (double-sided queue) that maintains a constant length, any new append operation would remove an element from the opposite end.
+            self.pop_infectious = collections.deque([0] * len(self.FUNC_INFECTIOUS_BASE),
+                                                    maxlen=len(self.FUNC_INFECTIOUS_BASE))  # representation of
+            # generate deques for each importation substream (direct, indirect, etc).
             self.pop_imports_comps = dict(
-                (col, collections.deque([0] * len(func_infectious), maxlen=len(func_infectious)))
+                (col, collections.deque([0] * len(self.FUNC_INFECTIOUS_BASE), maxlen=len(self.FUNC_INFECTIOUS_BASE)))
                 for col in self.imports_components.columns)
-            self.dS_import = None  # TODO: debug item
+            self.dS_import = None
             self.dS_native = None
 
 
@@ -726,11 +743,14 @@ class ISIRmodel_SingleRun:
         """
         Runs model with the defined simulation engine for the defined number of steps. Handles importation input per step, and conducts a post-processed function at the end.
         """
+        # check if simulation end criteria is met
         while self.sim_current <= self.sim_end:
-            if self.engine_name == 'step_v2_variable_beta':
+            # retrieve imported cases from external dataset, for current timestep
+            if 'step_v2' in self.engine_name:
                 if self.sim_current in self.imports_func:
                     imported = self.imports_components.loc[self.sim_current, :]
                 else:
+                    # provide zero dummy
                     imported = pd.Series(0., index=self.imports_components.columns)
 
             else:
@@ -753,7 +773,7 @@ class ISIRmodel_SingleRun:
         #     import_comps = imported
         #     imported = imported.sum()
         # else:
-
+        # TODO: possibility to add cumulative summation here instead of post-processing. This might allow simulation termination by the time a certain cumulative value is reached.
         for col, dq in self.pop_imports_comps.items():
             dq.appendleft(imported[col])  # should cast back to the original dict by reference
         # self.pop_imports_comps.appendleft(imported)
@@ -803,22 +823,59 @@ class ISIRmodel_SingleRun:
             if sum(self.pop_infectious) < self.TERMINATE_BELOW_I_TOTAL:
                 self.terminate = True
 
-    # Calculate the effective R number for that day, factoring in the number of susceptible people.
-    def get_R_eff_rt(self):
-        return self.R_zero * (self.pop_susceptible / self.POP_TOTAL)
+    # simplified version without reduction from proportion of remaining susceptible population (s)
+    # NOTE: this is only valid for early phase simulation, ie. for simulation up to 10k local cumulative cases.
+    # TODO: check what new cum_infected calculation here has an impact on the output
+    def step_v2b_variable_beta_constant_R(self, imported: pd.Series):  # this includes the E compartment
+        # insert new imports from function
+        for col, dq in self.pop_imports_comps.items():
+            dq.appendleft(imported[col])  # should cast back to the original dict by reference
+        # we only use constant beta_func for this simulation, not updated compared to step_v2
+        if self.beta_func_rt is None:
+            self.beta_func_rt = self.get_I_func_rt(R_eff_rt=self.R_zero)
+
+        # calculate expected 2ndary infections from importation subqueue and local infectious population
+        self.dS_import: Dict[str, float] = dict((col, np.array(dq) @ self.beta_func_rt)
+                                                for col, dq in self.pop_imports_comps.items())  # @ is dot product
+        self.dS_native: float = np.array(self.pop_infectious) @ self.beta_func_rt
+
+        # sum all new infection components to get new infectious population
+        dS = sum((*self.dS_import.values(), self.dS_native))  # '*' for unpacking
+        # dS = sum(i_components)  # sum for total new infectious persons
+        dR = self.pop_infectious[-1]
+
+        # calculate current local cumulative infected population (excl. new infectious (dS) because unrealistic)
+        cum_infected = self.pop_isolated + sum(self.pop_infectious)
+        # round current importation queue for readable output and debug
+        dS_comps = [round(n, 2) for n in self.dS_import.values()]
+        # record timestep for model output
+        # TODO: note new additions to recording!
+        self.record_metrics({
+            'infected_new': round(dS, 2),
+            'infected_new_imports': dict(zip(self.pop_imports_comps.keys(), dS_comps)),
+            'infected_new_native': round(self.dS_native, 2),
+            'infected_total': round(sum(self.pop_infectious), 2),
+            'infected_list': [round(n, 2) for n in self.pop_infectious],
+            'cum_infected': cum_infected,
+            'cum_infected_pct': cum_infected / self.POP_TOTAL,
+            'susceptible': self.pop_susceptible,
+            'susceptible_r': self.s,
+            'isolated': self.pop_isolated,
+            'imported': imported.to_dict(),
+            'R_eff_rt': self.r_rt})
+        # update population values for next timestep
+        self.pop_infectious.appendleft(dS)
+        self.pop_isolated += dR
+        self.pop_susceptible -= dS
+
+        # check for termination condition
+        if cum_infected > self.stop_cumulative:
+            self.terminate = True
 
     # Calculate the effective infection function for that day, using the R_eff
     def get_I_func_rt(self, R_eff_rt):
-        total_weights = sum(self.FUNC_INFECTIOUS)
-        return np.array(self.FUNC_INFECTIOUS) * R_eff_rt / total_weights
-
-    # Calculate effective beta (number of infected people per day), related to R.
-    def get_beta_eff_rt(self):
-        s = self.pop_susceptible / self.POP_TOTAL
-        return self.R_zero * s * s * self.t_inc
-
-    def get_beta_null(self):
-        return self.R_zero / self.t_inc
+        # total_weights = sum(self.FUNC_INFECTIOUS)  # TODO: depreciated because calculation done at initialisation
+        return np.array(self.FUNC_INFECTIOUS) * R_eff_rt  # / total_weights
 
     # Record relevant statistics per day
     def record_metrics(self, in_dict: Dict[str, Any]):
@@ -857,6 +914,9 @@ class ISIRmodel_SingleRun:
         self.pop_infectious.appendleft(dS)
         self.pop_isolated += dR
         self.pop_susceptible -= dS
+
+    def get_beta_null(self):
+        return self.R_zero / self.t_inc
 
     ############## POST-PROCESSING OPERATIONS (FOR SENSITIVITY ANALYSIS) ############
     @staticmethod
@@ -943,6 +1003,17 @@ class ISIRmodel_SingleRun:
         return duration, peak_day, peak_value
 
 ## COLD STORAGE
+
+# old v1 code, depreciated
+# Calculate the effective R number for that day, factoring in the number of susceptible people.
+# def get_R_eff_rt(self):
+#     return self.R_zero * (self.pop_susceptible / self.POP_TOTAL)
+# Calculate effective beta (number of infected people per day), related to R.
+# def get_beta_eff_rt(self):
+#     s = self.pop_susceptible / self.POP_TOTAL
+#     return self.R_zero * s * s * self.t_inc
+
+
 # a failed multiprocessing experiment
 
 # Multiprocess build that doesn't work as well
